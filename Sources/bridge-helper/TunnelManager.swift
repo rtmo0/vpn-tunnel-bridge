@@ -169,7 +169,7 @@ final class TunnelManager {
                     throw HelperError("No route to server \(ip). Is the network up?")
                 }
                 // The server must be reached directly, never inside another Bridge tunnel.
-                let throughTunnel = path.interface.map(ours.contains) ?? false
+                let throughTunnel = path.interface.map(Routes.isVirtual) ?? false
                 if throughTunnel, !ip.isIPv6, let uplink = Routes.uplink(excluding: ours) { path = uplink }
                 uplinkInterface = uplinkInterface ?? path.interface
                 if throughTunnel || allAllowed.contains(where: { $0.contains(ip) }) {
@@ -413,7 +413,8 @@ final class TunnelManager {
     }
 
     /// Keeps every tunnel's VPN servers on the physical uplink: a server reached
-    /// through another Bridge tunnel means double encryption and a detour.
+    /// through another tunnel (Bridge's or another VPN app's) means double
+    /// encryption and a detour.
     func ensureServerPins() {
         let ours = ourInterfaces
         guard let uplink = Routes.uplink(excluding: ours) else { return }
@@ -422,7 +423,7 @@ final class TunnelManager {
                 guard let ip = IPAddress(server), !ip.isIPv6,
                       !tunnel.routes.contains(where: { $0.destination == server }),
                       let path = Routes.lookup(server, ipv6: false), let interface = path.interface,
-                      ours.contains(interface) else { continue }
+                      Routes.isVirtual(interface), interface != uplink.interface else { continue }
                 let pin = RouteEntry(destination: server, ipv6: false, gateway: uplink.gateway,
                                      interface: uplink.gateway == nil ? uplink.interface : nil)
                 if (try? Routes.add(pin)) == true {

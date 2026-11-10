@@ -52,8 +52,13 @@ final class OpenVPNBackend: TunnelBackend {
     /// pin the server to the current path, then send all IPv4 traffic into the tunnel.
     func redirectAllTraffic(dev: String, server: String?) {
         var added: [RouteEntry] = []
-        if let server, let ip = IPAddress(server), let path = Routes.lookup(server, ipv6: ip.isIPv6),
+        if let server, let ip = IPAddress(server), var path = Routes.lookup(server, ipv6: ip.isIPv6),
            path.interface != dev {
+            // Straight out through Wi-Fi/Ethernet, not through another VPN.
+            if let interface = path.interface, Routes.isVirtual(interface), !ip.isIPv6,
+               let uplink = Routes.uplink(excluding: [dev]) {
+                path = uplink
+            }
             let pin = RouteEntry(destination: server, ipv6: ip.isIPv6, gateway: path.gateway,
                                  interface: path.gateway == nil ? path.interface : nil)
             if (try? Routes.add(pin)) == true { added.append(pin) }

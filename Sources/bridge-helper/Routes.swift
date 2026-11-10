@@ -55,18 +55,27 @@ enum Routes {
         return lookup
     }
 
-    /// The default route outside Bridge's own tunnels (Wi-Fi, Ethernet, or another VPN).
-    static func uplink(excluding interfaces: Set<String>) -> Lookup? {
+    /// Tunnel-like interfaces: Bridge's own and other VPN apps' (WireGuard, AmneziaWG, IPsec, …).
+    static func isVirtual(_ interface: String) -> Bool {
+        ["utun", "ipsec", "ppp", "tun", "tap", "gif", "stf"].contains { interface.hasPrefix($0) }
+    }
+
+    /// The physical way out (Wi-Fi, Ethernet, iPhone hotspot): the default route on a
+    /// real interface, even when a VPN app owns the main default route. Falls back to
+    /// any default route not in `interfaces` if there is no physical one.
+    static func uplink(excluding interfaces: Set<String> = []) -> Lookup? {
         let result = run("/usr/sbin/netstat", ["-rn", "-f", "inet"])
         guard result.succeeded else { return nil }
+        var fallback: Lookup?
         for line in result.output.split(separator: "\n") {
             let cols = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
             guard cols.count >= 4, cols[0] == "default", let interface = cols.last,
                   !interfaces.contains(interface) else { continue }
             let gateway = IPAddress(cols[1]) != nil ? cols[1] : nil
-            return Lookup(gateway: gateway, interface: interface)
+            if !isVirtual(interface), gateway != nil { return Lookup(gateway: gateway, interface: interface) }
+            if fallback == nil { fallback = Lookup(gateway: gateway, interface: interface) }
         }
-        return nil
+        return fallback
     }
 
     /// Adds a route. Returns false if an identical route already existed (so we don't own it).
