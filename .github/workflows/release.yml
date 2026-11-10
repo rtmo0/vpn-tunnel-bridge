@@ -24,13 +24,14 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
+          cache: false
 
       - name: Install build dependencies
         run: brew install openssl@3 lz4 lzo pkgconf

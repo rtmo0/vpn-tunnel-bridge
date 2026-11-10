@@ -31,6 +31,13 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         Bundle.main.object(forInfoDictionaryKey: "BridgeUpdateRepository") as? String ?? "rtmo0/vpn-tunnel-bridge"
     }
 
+    /// Exact build of this app, e.g. "0.3.2 (202611101745)". The helper records the
+    /// build that installed it, so any rebuild of the app prompts a helper update.
+    static var currentBuild: String {
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        return "\(currentVersion) (\(build))"
+    }
+
     static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }

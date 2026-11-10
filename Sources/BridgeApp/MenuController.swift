@@ -311,10 +311,12 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     @objc private func about() {
         NSApp.activate(ignoringOtherApps: true)
+        // Name, version and license only.
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Bridge",
-            .credits: NSAttributedString(string: "Tunnel Bridge — AmneziaWG, WireGuard and OpenVPN for macOS.",
-                                         attributes: [.font: NSFont.systemFont(ofSize: 11)]),
+            .applicationVersion: Updater.currentVersion,
+            .version: "",
+            .credits: NSAttributedString(string: ""),
         ])
     }
 

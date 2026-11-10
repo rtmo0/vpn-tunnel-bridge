@@ -69,7 +69,7 @@ final class AppModel: ObservableObject {
         let previous = rows
         work.async {
             let saved = TunnelLibrary.list()
-            let availability = HelperClient.availability(expectedBuild: Updater.currentVersion)
+            let availability = HelperClient.availability(expectedBuild: Updater.currentBuild)
             var statuses: [TunnelStatus]?
             if case .ready = availability, !skipStatus { statuses = try? HelperClient.statuses() }
             DispatchQueue.main.async {
@@ -118,7 +118,12 @@ final class AppModel: ObservableObject {
 
     func connect(_ name: String) {
         guard helperReady else {
-            Alerts.show("The Bridge helper is not installed", "Choose “Install Helper…” in the Bridge menu first.")
+            let installed = helper != .notInstalled
+            let title = installed ? "The Bridge helper needs an update" : "The Bridge helper is not installed"
+            if Alerts.confirm(title, "Bridge will ask for your administrator password, then connect “\(name)”.",
+                              button: installed ? "Update and Connect" : "Install and Connect") {
+                installHelper { [weak self] in self?.connect(name) }
+            }
             return
         }
         let canOpenVPN = capabilities.contains(.openvpn)
@@ -128,7 +133,7 @@ final class AppModel: ObservableObject {
             do {
                 let (text, kind) = try TunnelLibrary.load(name)
                 if kind == .openvpn && !canOpenVPN {
-                    throw ClientError("OpenVPN is not included in this build of Bridge.")
+                    throw ClientError("The installed helper has no OpenVPN. Choose “Update Helper…” in the Bridge menu.")
                 }
                 _ = try Connector.connect(name: name, text: text, kind: kind) { prompt in
                     DispatchQueue.main.sync { Prompter.ask(prompt) }
@@ -229,16 +234,20 @@ final class AppModel: ObservableObject {
 
     // MARK: Helper
 
-    func installHelper() {
+    func installHelper(then next: (() -> Void)? = nil) {
         installing = true
         changed()
         work.async {
             var failure: String?
             do { try HelperInstaller.install() } catch { failure = error.localizedDescription }
+            // Pick up the new helper before continuing.
+            let availability = HelperClient.availability(expectedBuild: Updater.currentBuild)
             DispatchQueue.main.async {
                 self.installing = false
+                self.helper = availability
                 if let failure { Alerts.show("Helper installation failed", failure) }
                 self.refresh()
+                if failure == nil, self.helperReady { next?() }
             }
         }
     }

@@ -39,7 +39,8 @@ public enum HelperClient {
         guard let response = try? send(HelperRequest(command: .ping), timeout: 3) else { return .notInstalled }
         let version = response.helperVersion ?? 1
         if version != HelperProtocol.version { return .outdated(installed: version) }
-        if let expectedBuild, let build = response.helperBuild, build != expectedBuild {
+        // A helper that doesn't report its build predates build tracking: also outdated.
+        if let expectedBuild, response.helperBuild != expectedBuild {
             return .outdated(installed: version)
         }
         return .ready(capabilities: response.capabilities ?? [.amneziawg, .wireguard])
