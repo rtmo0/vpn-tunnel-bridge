@@ -1,86 +1,90 @@
 # Bridge
 
-**Tunnel Bridge** — an open-source VPN client for macOS.
+**Tunnel Bridge** — an open-source VPN client for macOS that lives in the menu bar.
 
-Bridge runs VPN backends as a privileged helper over plain `utun` interfaces,
+Bridge runs VPN backends through a privileged helper over plain `utun` interfaces,
 so it needs no Network Extension entitlement and no Apple Developer account,
 and it can run several tunnels side by side.
 
-## Status
+## Protocols
 
-Early development. Working today:
+| Protocol | Backend | Notes |
+|---|---|---|
+| **AmneziaWG** | [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) | every parameter of versions 1.0, 1.5 and 2.0: `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` (incl. ranges), `I1`–`I5`, `HeaderProtectionKey`, `ContentPaddingAddition`, timing options |
+| **WireGuard** | amneziawg-go | wire-compatible when no obfuscation is set |
+| **OpenVPN** | [OpenVPN 2.7](https://github.com/OpenVPN/openvpn) | username/password, certificates, encrypted keys, static challenge (OTP), pushed DNS |
 
-- **AmneziaWG** with every parameter of protocol versions 1.0, 1.5 and 2.0
-  (`Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` incl. ranges, `I1`–`I5`,
-  `HeaderProtectionKey`, `ContentPaddingAddition`, timing options, …)
-- **WireGuard** (same backend, without obfuscation)
-- Full-tunnel and split-tunnel routing, DNS, several tunnels at once
-- Command-line client
+Unknown WireGuard/AmneziaWG keys are **rejected with a clear error**, never silently dropped.
 
-Planned: menu bar app, OpenVPN, reconnect on network change, kill switch.
+## Build
 
-Unknown config keys are **rejected with a clear error**, never silently dropped.
-
-## Requirements
-
-- macOS 13 or later
-- Xcode command-line tools (Swift 6)
-- Go (to build `amneziawg-go`): `brew install go`
-
-## Build and install
+Requirements: macOS 14+, Xcode command-line tools, Homebrew.
 
 ```bash
-scripts/build.sh          # as your user: builds CLI, helper and amneziawg-go
-sudo scripts/install.sh   # installs the launchd helper and /usr/local/bin/bridge
+brew install go openssl@3 lz4 lzo pkgconf
+scripts/build-openvpn.sh   # once: builds OpenVPN with static OpenSSL (optional)
+scripts/build.sh           # builds everything and assembles build/Bridge.app
+open build/Bridge.app
 ```
 
-Uninstall: `sudo scripts/install.sh --uninstall`
+On first launch click **Install Helper…** in the menu and enter your password.
+The helper is a launchd daemon; tunnels keep running when the app is closed.
 
-## Usage
+## Using the app
+
+- **Import…** — pick `.conf` (WireGuard / AmneziaWG) or `.ovpn` files. Certificates
+  and keys referenced by an `.ovpn` are embedded; `auth-user-pass` files go to the Keychain.
+- Flip the switch to connect. OpenVPN asks for credentials when needed and can
+  remember them in the Keychain.
+- Right-click a tunnel to remove it, forget its password or show it in Finder.
+- **Logs** opens `/var/log/bridge` (`helper.log` and one log per tunnel).
+
+## Command line
+
+The helper installation also puts `bridge` in `/usr/local/bin`:
 
 ```bash
-bridge check my-server.conf     # validate and show what will be applied
-bridge import my-server.conf    # save to ~/Library/Application Support/Bridge/Tunnels
-bridge up my-server             # connect
-bridge status                   # handshake, traffic, interface
-bridge down my-server           # disconnect (or: bridge down --all)
-bridge list
+bridge import my-server.conf
+bridge up my-server
+bridge status
+bridge down my-server        # or: bridge down --all
+bridge check file.ovpn       # validate without connecting
 ```
-
-Logs: `/var/log/bridge/helper.log` and `/var/log/bridge/<tunnel>.log`.
 
 ## How it works
 
 ```
-bridge (CLI, your user) ──JSON over /var/run/bridge/helper.sock──▶ bridge-helper (root, launchd)
-                                                                       │
-                                     ┌─────────────────────────────────┼────────────────────────┐
-                                     ▼                                 ▼                        ▼
-                         amneziawg-go -f utun          route / ifconfig (addresses,   SystemConfiguration
-                         configured over its UAPI      split default route, pinned    (DNS, as temporary
-                         socket /var/run/amneziawg     route to the server)           keys of the helper)
+Bridge.app / bridge CLI (your user)
+        │  JSON over /var/run/bridge/helper.sock (admin users only)
+        ▼
+bridge-helper (root, launchd)
+  ├─ amneziawg-go -f utun   configured over its UAPI socket; Bridge sets addresses,
+  │                         split default route (0/1 + 128/1), pinned server route
+  ├─ openvpn                driven via its management socket; configures utun and
+  │                         routes itself, Bridge answers password prompts
+  └─ DNS                    System Configuration dynamic store, temporary keys
 ```
 
-- The helper talks to `amneziawg-go` directly over the UAPI socket, so every
-  parameter in the config reaches the backend.
-- A full tunnel uses `0.0.0.0/1` + `128.0.0.0/1` (and `::/1` + `8000::/1`), and
-  the route to the VPN server is pinned to the current uplink first.
-- DNS settings are published as temporary dynamic-store keys: if the helper dies,
-  macOS removes them automatically.
-- Routes and backend PIDs are recorded in `/var/run/bridge/state.json`; a
-  restarted helper cleans up whatever a crashed one left behind.
+- DNS settings are temporary dynamic-store keys of the helper: if it dies, macOS
+  removes them automatically.
+- Routes and backend PIDs are recorded in `/var/run/bridge/state.json`; a restarted
+  helper cleans up whatever a crashed one left behind.
 
 ## Security
 
-- Only root and members of the `admin` group can talk to the helper (checked with `getpeereid`).
-- The helper refuses to execute a backend that is not owned by root or is writable by others.
-- `PreUp`/`PostUp`/`PreDown`/`PostDown` are ignored: Bridge never runs commands from config files.
-- Private keys never appear in logs.
+- Only root and members of the `admin` group can talk to the helper (`getpeereid`).
+- The helper refuses to execute backends that are not owned by root or are writable by others.
+- Scripts from config files never run: `PreUp`/`PostUp`/… in WireGuard configs and
+  `up`/`down`/`plugin`/`tls-verify`/… in OpenVPN configs are stripped. OpenVPN configs
+  must be self-contained (no file references, no `config` includes) when they reach the helper.
+- Private keys and passwords never appear in logs; OpenVPN passwords live in the Keychain.
 
-## Third-party components
+## Not yet
 
-- [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (MIT), built from source by `scripts/build-backend.sh`.
+Reconnect on network change, kill switch, IPv6 leak protection for IPv4-only tunnels,
+corporate protocols (OpenConnect), Developer ID signing.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Bundled backends keep their own licenses:
+amneziawg-go (MIT), OpenVPN (GPL-2.0, built from unmodified upstream source).

@@ -7,6 +7,26 @@ import Foundation
 setvbuf(stdout, nil, _IOLBF, 0)
 signal(SIGPIPE, SIG_IGN)
 
+// `bridge-helper openvpn-event up|down` is the route-up/down hook that OpenVPN
+// runs (as root). It forwards the event and OpenVPN's environment to the daemon.
+if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event" {
+    let env = ProcessInfo.processInfo.environment
+    let wanted = env.filter { key, _ in
+        key == "dev" || key.hasPrefix("foreign_option_") || key.hasPrefix("dns_") || key.hasPrefix("ifconfig_")
+            || key == "BRIDGE_TUNNEL"
+    }
+    let request = HelperRequest(command: .openvpnEvent, name: env["BRIDGE_TUNNEL"],
+                                event: CommandLine.arguments[2], environment: wanted)
+    if let fd = try? UnixSocket.connect(path: HelperProtocol.socketPath, timeout: 10),
+       let data = try? JSONEncoder.bridge.encode(request) {
+        try? UnixSocket.writeAll(fd, String(decoding: data, as: UTF8.self) + "\n")
+        _ = try? UnixSocket.read(fd, until: "\n")
+        close(fd)
+    }
+    // Never fail the connection because of DNS.
+    exit(0)
+}
+
 guard getuid() == 0 else {
     FileHandle.standardError.write("bridge-helper must run as root (it is started by launchd).\n".data(using: .utf8)!)
     exit(1)
@@ -23,6 +43,7 @@ do {
 } catch {
     log("! \(error)")
 }
+log(OpenVPNBackend.isAvailable ? "OpenVPN backend: \(OpenVPNBackend.executablePath)" : "OpenVPN backend not installed")
 
 let manager = TunnelManager()
 manager.queue.sync { manager.recoverFromPreviousRun() }
@@ -70,6 +91,20 @@ func serve(_ fd: Int32) {
     guard let line = try? UnixSocket.read(fd, until: "\n", limit: 1 << 20),
           let request = try? JSONDecoder.bridge.decode(HelperRequest.self, from: Data(line.utf8)) else {
         reply(.failure("Malformed request"))
+        return
+    }
+    if request.command == .ping {
+        // Answered without the manager queue so clients don't time out while a tunnel connects.
+        reply(HelperResponse(ok: true, capabilities: manager.capabilities))
+        return
+    }
+    if request.command == .openvpnEvent {
+        // Comes from OpenVPN while `up` may still hold the manager queue.
+        guard uid == 0, let name = request.name, let event = request.event else {
+            reply(.failure("Not allowed"))
+            return
+        }
+        reply(OpenVPNRegistry.shared.handleEvent(tunnel: name, event: event, environment: request.environment ?? [:]))
         return
     }
     let response = manager.queue.sync { manager.handle(request) }

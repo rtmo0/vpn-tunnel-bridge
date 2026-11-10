@@ -1,33 +1,79 @@
 #!/bin/bash
-# Builds Bridge (CLI + helper) in release mode, plus the backend if missing.
-# Run as your normal user, not with sudo.
+# Builds everything and assembles build/Bridge.app. Run as your normal user.
 #
-# Output: build/bin/{bridge,bridge-helper,amneziawg-go}
+#   scripts/build.sh
+#
+# Output:
+#   build/Bridge.app          the app (installs its helper on first launch)
+#   build/bin/                CLI, helper and backends (for scripts/install.sh)
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/build/bin"
+APP="$ROOT/build/Bridge.app"
+VERSION="0.2.0"
 
 if [ "$(id -u)" = 0 ]; then
-  echo "Run scripts/build.sh as your normal user (only install.sh needs sudo)." >&2
+  echo "Run scripts/build.sh as your normal user." >&2
   exit 1
 fi
 
 if [ ! -x "$ROOT/build/backend/amneziawg-go" ]; then
   "$ROOT/scripts/build-backend.sh"
 fi
+if [ ! -x "$ROOT/build/backend/openvpn" ]; then
+  echo "NOTE: build/backend/openvpn not found; building without OpenVPN. Run scripts/build-openvpn.sh to add it."
+fi
 
-echo "==> Building Bridge"
+echo "==> Building Swift targets"
 cd "$ROOT"
-swift build -c release --arch arm64 --arch x86_64
+swift build -c release --arch arm64 --arch x86_64 2>&1 | grep -vE '^\[[0-9]+/[0-9]+\]|x86_64 architecture is deprecated' || true
 PRODUCTS="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+[ -x "$PRODUCTS/BridgeApp" ] || { echo "Swift build failed" >&2; exit 1; }
 
+echo "==> Collecting binaries"
+rm -rf "$BIN"
 mkdir -p "$BIN"
-cp "$PRODUCTS/bridge" "$PRODUCTS/bridge-helper" "$BIN/"
-cp "$ROOT/build/backend/amneziawg-go" "$BIN/"
+cp "$PRODUCTS/bridge" "$PRODUCTS/bridge-helper" "$ROOT/build/backend/amneziawg-go" "$BIN/"
+[ -x "$ROOT/build/backend/openvpn" ] && cp "$ROOT/build/backend/openvpn" "$BIN/"
 for f in "$BIN"/*; do codesign --force --sign - "$f" 2>/dev/null; done
 
-echo "==> Built:"
-for f in "$BIN"/*; do echo "    $(basename "$f"): $(lipo -archs "$f")"; done
-echo "Next: sudo scripts/install.sh"
+echo "==> Assembling Bridge.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$PRODUCTS/BridgeApp" "$APP/Contents/MacOS/Bridge"
+cp "$BIN"/* "$APP/Contents/Resources/"
+install -m 755 "$ROOT/scripts/install-helper.sh" "$APP/Contents/Resources/install-helper.sh"
+
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>Bridge</string>
+  <key>CFBundleIdentifier</key><string>com.rtmo0.bridge</string>
+  <key>CFBundleName</key><string>Bridge</string>
+  <key>CFBundleDisplayName</key><string>Bridge</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$(date +%Y%m%d%H%M)</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Tunnel Bridge. MIT License.</string>
+</dict>
+</plist>
+PLIST
+
+for f in "$APP/Contents/Resources"/*; do
+  [ -x "$f" ] && [ "${f##*.}" != "sh" ] && codesign --force --sign - "$f" 2>/dev/null
+done
+codesign --force --sign - "$APP"
+codesign --verify "$APP"
+
+echo "==> Done"
+for f in "$APP/Contents/MacOS/Bridge" "$APP/Contents/Resources"/*; do
+  [ "${f##*.}" = "sh" ] && continue
+  echo "    $(basename "$f"): $(lipo -archs "$f")"
+done
+echo "Run it: open \"$APP\""

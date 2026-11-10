@@ -5,7 +5,7 @@ import Foundation
 ///
 /// The same backend also serves plain WireGuard configs: without obfuscation
 /// parameters AmneziaWG is wire-compatible with WireGuard.
-final class AmneziaBackend {
+final class AmneziaBackend: TunnelBackend {
     static let uapiDirectory = "/var/run/amneziawg"
     static let runDirectory = "/var/run/bridge"
     static let logDirectory = "/var/log/bridge"
@@ -17,10 +17,13 @@ final class AmneziaBackend {
     var isRunning: Bool { process.isRunning }
     var uapiPath: String { "\(Self.uapiDirectory)/\(interface).sock" }
 
+    static var helperExecutablePath: String {
+        (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath().path
+    }
+
     /// Location of the bundled backend binary, next to the helper executable.
     static var executablePath: String {
-        let helper = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
-        return helper.resolvingSymlinksInPath().deletingLastPathComponent()
+        URL(fileURLWithPath: helperExecutablePath).deletingLastPathComponent()
             .appendingPathComponent("amneziawg-go").path
     }
 

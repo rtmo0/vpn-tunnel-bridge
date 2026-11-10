@@ -1,3 +1,4 @@
+import BridgeClient
 import BridgeCore
 import Foundation
 
@@ -5,15 +6,15 @@ let usage = """
 bridge — Tunnel Bridge command-line client
 
 USAGE
-  bridge import <file.conf> [--name <name>]   Save a config to your tunnel library
-  bridge list                                  List saved tunnels and whether they are connected
-  bridge up <name | file.conf> [--name <n>]   Connect a tunnel
-  bridge down <name> | --all                  Disconnect
-  bridge status [name]                        Live status: handshake, traffic, interface
-  bridge check <name | file.conf>             Validate a config and show what will be applied
-  bridge remove <name>                        Delete a saved tunnel
+  bridge import <file> [--name <name>]       Save a .conf (WireGuard/AmneziaWG) or .ovpn to your library
+  bridge list                                List saved tunnels and whether they are connected
+  bridge up <name | file> [--name <n>]       Connect a tunnel
+  bridge down <name> | --all                 Disconnect
+  bridge status [name]                       Live status
+  bridge check <name | file>                 Validate a config and show what will be applied
+  bridge remove <name>                       Delete a saved tunnel (and its saved passwords)
+  bridge forget <name>                       Delete saved passwords of a tunnel
 
-Supported: AmneziaWG (1.0, 1.5, 2.0 parameters) and plain WireGuard.
 Library: ~/Library/Application Support/Bridge/Tunnels
 """
 
@@ -21,8 +22,6 @@ struct CLIError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }
-
-// MARK: - Argument helpers
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 
@@ -40,41 +39,65 @@ func takeFlag(_ name: String) -> Bool {
     return true
 }
 
-/// Accepts either a saved tunnel name or a path to a .conf file.
-func resolveConfig(_ reference: String, nameOverride: String?) throws -> (name: String, text: String) {
+/// A saved tunnel name or a path to a config file.
+func resolve(_ reference: String, nameOverride: String?) throws -> (name: String, loaded: TunnelLibrary.Loaded) {
     let path = (reference as NSString).expandingTildeInPath
     var isDirectory: ObjCBool = false
     if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue {
-        let text = try String(contentsOfFile: path, encoding: .utf8)
-        let name = nameOverride ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
-        return (name, text)
+        let loaded = try TunnelLibrary.read(fileAt: URL(fileURLWithPath: path))
+        return (nameOverride.map(TunnelName.sanitized) ?? loaded.suggestedName, loaded)
     }
-    guard TunnelLibrary.names().contains(reference) else {
+    guard TunnelLibrary.find(reference) != nil else {
         throw CLIError("No saved tunnel or file named '\(reference)'. See 'bridge list'.")
     }
-    return (nameOverride ?? reference, try TunnelLibrary.load(reference))
+    let saved = try TunnelLibrary.load(reference)
+    return (nameOverride ?? reference,
+            TunnelLibrary.Loaded(suggestedName: reference, kind: saved.kind, text: saved.text, embedded: .init(), warnings: []))
 }
 
-func validName(_ name: String) throws -> String {
-    guard TunnelName.isValid(name) else {
-        throw CLIError("'\(name)' is not a valid tunnel name: use letters, digits, '-', '_' and '.' (max 40).")
+// MARK: Prompts
+
+func prompt(_ text: String) -> String {
+    print(text, terminator: "")
+    fflush(stdout)
+    return readLine() ?? ""
+}
+
+func promptSecret(_ text: String) -> String {
+    guard let value = getpass(text) else { return "" }
+    return String(cString: value)
+}
+
+func askYesNo(_ text: String) -> Bool {
+    let answer = prompt("\(text) [Y/n] ").lowercased()
+    return answer.isEmpty || answer.hasPrefix("y")
+}
+
+func ask(_ secret: SecretPrompt) -> SecretAnswer? {
+    switch secret {
+    case let .usernamePassword(tunnel, username, retry):
+        if retry { print("Authentication failed for '\(tunnel)'.") }
+        var user = prompt("Username\(username.map { " [\($0)]" } ?? ""): ")
+        if user.isEmpty { user = username ?? "" }
+        guard !user.isEmpty else { return nil }
+        let pass = promptSecret("Password: ")
+        return SecretAnswer(username: user, secret: pass, remember: askYesNo("Save in Keychain?"))
+    case let .keyPassphrase(tunnel, retry):
+        if retry { print("Wrong passphrase.") }
+        let pass = promptSecret("Private key passphrase for '\(tunnel)': ")
+        guard !pass.isEmpty else { return nil }
+        return SecretAnswer(secret: pass, remember: askYesNo("Save in Keychain?"))
+    case let .challenge(_, text, echo):
+        let value = echo ? prompt("\(text): ") : promptSecret("\(text): ")
+        return value.isEmpty ? nil : SecretAnswer(secret: value, remember: false)
     }
-    return name
 }
 
-func parse(_ text: String) throws -> TunnelConfig {
-    do {
-        return try TunnelConfig.parse(text)
-    } catch let error as ConfigError {
-        throw CLIError("Invalid config: \(error)")
-    }
-}
-
-// MARK: - Formatting
+// MARK: Formatting
 
 func ago(_ date: Date?) -> String {
     guard let date else { return "never" }
-    let seconds = Int(Date().timeIntervalSince(date))
+    let seconds = max(0, Int(Date().timeIntervalSince(date)))
     if seconds < 60 { return "\(seconds)s ago" }
     if seconds < 3600 { return "\(seconds / 60)m \(seconds % 60)s ago" }
     return "\(seconds / 3600)h \(seconds % 3600 / 60)m ago"
@@ -84,64 +107,56 @@ func bytes(_ count: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(clamping: count), countStyle: .binary)
 }
 
-func health(_ status: TunnelStatus) -> String {
-    guard let last = status.lastHandshake else { return "waiting for handshake" }
-    // WireGuard re-handshakes every 2 minutes while traffic flows.
-    return Date().timeIntervalSince(last) < 180 ? "connected" : "stale (no recent handshake)"
+func printStatus(_ s: TunnelStatus) {
+    print("\(s.name): \(s.state)")
+    print("  protocol:   \(s.kind.displayName)")
+    print("  interface:  \(s.interface.isEmpty ? "-" : s.interface) (pid \(s.pid))")
+    if let server = s.server { print("  server:     \(server)") }
+    if !s.addresses.isEmpty { print("  addresses:  \(s.addresses.joined(separator: ", "))") }
+    if !s.dnsServers.isEmpty { print("  dns:        \(s.dnsServers.joined(separator: ", "))") }
+    print("  routing:    \(s.fullTunnel ? "all traffic" : "selected networks")")
+    if s.kind != .openvpn { print("  handshake:  \(ago(s.lastHandshake))") }
+    print("  traffic:    received \(bytes(s.rxBytes)), sent \(bytes(s.txBytes))")
+    for warning in s.warnings { print("  note: \(warning)") }
 }
 
-func printStatus(_ status: TunnelStatus) {
-    print("\(status.name): \(health(status))")
-    print("  protocol:   \(status.amnezia ? "AmneziaWG" : "WireGuard")")
-    print("  interface:  \(status.interface) (pid \(status.pid)), up \(ago(status.startedAt).replacingOccurrences(of: " ago", with: ""))")
-    print("  addresses:  \(status.addresses.joined(separator: ", "))")
-    if !status.dnsServers.isEmpty { print("  dns:        \(status.dnsServers.joined(separator: ", "))") }
-    print("  routing:    \(status.fullTunnel ? "all traffic" : "selected networks")")
-    for peer in status.peers {
-        print("  peer \(peer.publicKey.prefix(8))…  \(peer.endpoint ?? "no endpoint")")
-        print("    handshake \(ago(peer.lastHandshake)), received \(bytes(peer.rxBytes)), sent \(bytes(peer.txBytes))")
-    }
-    for warning in status.warnings { print("  note: \(warning)") }
-}
-
-func describe(_ config: TunnelConfig) {
-    print("protocol:   \(config.usesAmneziaObfuscation ? "AmneziaWG" : "WireGuard")")
-    print("addresses:  \(config.addresses.map(\.description).joined(separator: ", "))")
-    if !config.dnsServers.isEmpty || !config.dnsSearchDomains.isEmpty {
-        print("dns:        \((config.dnsServers.map(\.description) + config.dnsSearchDomains).joined(separator: ", "))")
-    }
-    print("mtu:        \(config.mtu.map(String.init) ?? "auto")")
-    print("routing:    \(config.isFullTunnel ? "all traffic" : "selected networks")")
-    if !config.deviceParameters.isEmpty {
-        print("parameters passed to the backend:")
-        for p in config.deviceParameters {
-            let shown: String
-            if p.isSecret {
-                shown = "(key, hidden)"
-            } else if p.value.count > 48 {
-                shown = "\(p.value.prefix(40))… (\(p.value.count) chars)"
-            } else {
-                shown = p.value
-            }
-            print("  \(p.name.padding(toLength: 24, withPad: " ", startingAt: 0)) \(shown)")
+func describe(_ loaded: TunnelLibrary.Loaded) throws {
+    print("protocol:   \(loaded.kind.displayName)")
+    switch loaded.kind {
+    case .amneziawg, .wireguard:
+        let config = try TunnelConfig.parse(loaded.text)
+        print("addresses:  \(config.addresses.map(\.description).joined(separator: ", "))")
+        if !config.dnsServers.isEmpty || !config.dnsSearchDomains.isEmpty {
+            print("dns:        \((config.dnsServers.map(\.description) + config.dnsSearchDomains).joined(separator: ", "))")
         }
+        print("mtu:        \(config.mtu.map(String.init) ?? "auto")")
+        print("routing:    \(config.isFullTunnel ? "all traffic" : "selected networks")")
+        if !config.deviceParameters.isEmpty {
+            print("parameters passed to the backend:")
+            for p in config.deviceParameters {
+                let shown = p.isSecret ? "(key, hidden)"
+                    : p.value.count > 48 ? "\(p.value.prefix(40))… (\(p.value.count) chars)" : p.value
+                print("  \(p.name.padding(toLength: 24, withPad: " ", startingAt: 0)) \(shown)")
+            }
+        }
+        for peer in config.peers {
+            print("peer \(peer.publicKey.prefix(8))…  \(peer.endpoint?.description ?? "no endpoint")")
+            print("  allowed:   \(peer.allowedIPs.map(\.description).joined(separator: ", "))")
+        }
+        for warning in config.warnings { print("note: \(warning)") }
+    case .openvpn:
+        let config = try OpenVPNConfig.parse(loaded.text)
+        print("servers:    \(config.remotes.joined(separator: ", "))")
+        print("routing:    \(config.redirectsGateway ? "all traffic" : "as pushed by the server")")
+        print("login:      \(config.needsUsernamePassword ? "username + password" : "certificate only")")
+        if let challenge = config.staticChallenge { print("challenge:  \(challenge.text)") }
+        if config.hasEncryptedPrivateKey { print("key:        passphrase-protected") }
+        let prepared = try config.prepared(tunnel: "check", managementSocket: "/dev/null", eventCommand: "true")
+        for warning in prepared.warnings { print("note: \(warning)") }
     }
-    for peer in config.peers {
-        print("peer \(peer.publicKey.prefix(8))…  \(peer.endpoint?.description ?? "no endpoint")")
-        print("  allowed:   \(peer.allowedIPs.map(\.description).joined(separator: ", "))")
-        if let keepalive = peer.persistentKeepalive { print("  keepalive: \(keepalive)s") }
-        if peer.presharedKey != nil { print("  preshared key: yes") }
-    }
-    for warning in config.warnings { print("note: \(warning)") }
 }
 
-func request(_ request: HelperRequest, timeout: Int = 60) throws -> HelperResponse {
-    let response = try HelperClient.send(request, timeout: timeout)
-    guard response.ok else { throw CLIError(response.error ?? "helper reported an unknown error") }
-    return response
-}
-
-// MARK: - Commands
+// MARK: Commands
 
 func run() throws {
     guard let command = arguments.first else {
@@ -153,80 +168,74 @@ func run() throws {
     switch command {
     case "import":
         let name = try takeOption("--name")
-        guard let file = arguments.first else { throw CLIError("Usage: bridge import <file.conf> [--name <name>]") }
-        let path = (file as NSString).expandingTildeInPath
-        let text = try String(contentsOfFile: path, encoding: .utf8)
-        let config = try parse(text)
-        let tunnelName = try validName(name ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent)
-        try TunnelLibrary.save(text, as: tunnelName)
-        print("Saved '\(tunnelName)' (\(config.usesAmneziaObfuscation ? "AmneziaWG" : "WireGuard")).")
-        print("Connect with: bridge up \(tunnelName)")
+        guard let file = arguments.first else { throw CLIError("Usage: bridge import <file> [--name <name>]") }
+        let saved = try TunnelLibrary.importFile(at: URL(fileURLWithPath: (file as NSString).expandingTildeInPath),
+                                                 as: name)
+        print("Saved '\(saved.name)' (\(saved.kind.displayName)). Connect with: bridge up \(saved.name)")
 
     case "list":
-        let saved = TunnelLibrary.names()
-        let active = (try? HelperClient.send(HelperRequest(command: .status), timeout: 5))?.tunnels ?? []
-        let activeNames = Set(active.map(\.name))
-        if saved.isEmpty && active.isEmpty {
-            print("No tunnels yet. Add one with: bridge import <file.conf>")
-        }
-        for name in Set(saved).union(activeNames).sorted() {
-            let state = active.first { $0.name == name }.map(health) ?? "disconnected"
-            print("\(name.padding(toLength: 24, withPad: " ", startingAt: 0)) \(state)")
+        let saved = TunnelLibrary.list()
+        let active = (try? HelperClient.statuses()) ?? []
+        if saved.isEmpty && active.isEmpty { print("No tunnels yet. Add one with: bridge import <file>") }
+        let names = Set(saved.map(\.name)).union(active.map(\.name)).sorted()
+        for name in names {
+            let kind = saved.first { $0.name == name }?.kind ?? active.first { $0.name == name }?.kind
+            let state = active.first { $0.name == name }?.state ?? "Disconnected"
+            print("\(name.padding(toLength: 24, withPad: " ", startingAt: 0)) "
+                + "\((kind?.displayName ?? "").padding(toLength: 11, withPad: " ", startingAt: 0)) \(state)")
         }
 
     case "up":
-        let name = try takeOption("--name")
-        guard let reference = arguments.first else { throw CLIError("Usage: bridge up <name | file.conf>") }
-        let resolved = try resolveConfig(reference, nameOverride: name)
-        _ = try parse(resolved.text)
-        let tunnelName = try validName(resolved.name)
-        print("Connecting '\(tunnelName)'…")
-        let response = try request(HelperRequest(command: .up, name: tunnelName, config: resolved.text))
-
-        // Give the first handshake a moment so the user sees a meaningful state.
-        var status = response.tunnels?.first
+        let override = try takeOption("--name")
+        guard let reference = arguments.first else { throw CLIError("Usage: bridge up <name | file>") }
+        let (name, loaded) = try resolve(reference, nameOverride: override)
+        guard TunnelName.isValid(name) else { throw CLIError("'\(name)' is not a valid tunnel name") }
+        print("Connecting '\(name)' (\(loaded.kind.displayName))…")
+        var status = try Connector.connect(name: name, text: loaded.text, kind: loaded.kind,
+                                           embedded: loaded.embedded, ask: ask)
         let deadline = Date().addingTimeInterval(6)
-        while status?.lastHandshake == nil && Date() < deadline {
+        while !status.connected && Date() < deadline {
             usleep(500_000)
-            status = (try? request(HelperRequest(command: .status, name: tunnelName), timeout: 5))?.tunnels?.first
+            if let fresh = (try? HelperClient.statuses())?.first(where: { $0.name == name }) { status = fresh }
         }
-        if let status { printStatus(status) }
-        if status?.lastHandshake == nil {
-            print("\nNo handshake yet. If it stays like this, check the server and see /var/log/bridge/\(tunnelName).log")
+        printStatus(status)
+        if !status.connected {
+            print("\nNot connected yet. Details: /var/log/bridge/\(name).log")
         }
 
     case "down":
         if takeFlag("--all") {
-            _ = try request(HelperRequest(command: .downAll))
+            try HelperClient.call(HelperRequest(command: .downAll))
             print("All tunnels disconnected.")
         } else {
             guard let name = arguments.first else { throw CLIError("Usage: bridge down <name> | --all") }
-            _ = try request(HelperRequest(command: .down, name: name))
+            try HelperClient.disconnect(name)
             print("'\(name)' disconnected.")
         }
 
     case "status":
         let name = arguments.first
-        let tunnels = try request(HelperRequest(command: .status, name: name), timeout: 10).tunnels ?? []
-        if tunnels.isEmpty {
-            print(name.map { "'\($0)' is not connected." } ?? "No tunnels connected.")
-        }
+        let tunnels = try HelperClient.statuses().filter { name == nil || $0.name == name }
+        if tunnels.isEmpty { print(name.map { "'\($0)' is not connected." } ?? "No tunnels connected.") }
         for (index, status) in tunnels.enumerated() {
             if index > 0 { print("") }
             printStatus(status)
         }
 
     case "check":
-        guard let reference = arguments.first else { throw CLIError("Usage: bridge check <name | file.conf>") }
-        let resolved = try resolveConfig(reference, nameOverride: nil)
-        describe(try parse(resolved.text))
+        guard let reference = arguments.first else { throw CLIError("Usage: bridge check <name | file>") }
+        try describe(try resolve(reference, nameOverride: nil).loaded)
         print("\nConfig is valid.")
 
     case "remove":
         guard let name = arguments.first else { throw CLIError("Usage: bridge remove <name>") }
-        guard TunnelLibrary.names().contains(name) else { throw CLIError("No saved tunnel named '\(name)'.") }
         try TunnelLibrary.remove(name)
         print("Removed '\(name)'.")
+
+    case "forget":
+        guard let name = arguments.first else { throw CLIError("Usage: bridge forget <name>") }
+        Keychain.deleteAll(for: name)
+        print("Saved passwords of '\(name)' deleted.")
 
     case "-h", "--help", "help":
         print(usage)
