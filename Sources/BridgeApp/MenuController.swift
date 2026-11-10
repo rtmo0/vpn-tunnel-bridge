@@ -39,7 +39,6 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
-        statusItem.button?.toolTip = "Bridge"
         model.onChange = { [weak self] in self?.update() }
         updater.onChange = { [weak self] in self?.update() }
         update()
