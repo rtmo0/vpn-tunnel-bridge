@@ -10,6 +10,17 @@
 
 set -euo pipefail
 
+# On GitHub Actions, surface failures as annotations (readable without log access).
+annotate() {  # $1 = title, $2 = file or text
+  [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  local body
+  if [ -f "$2" ]; then body="$(grep -iE 'error|not found|missing|undefined|fatal' "$2" | tail -25)"; [ -n "$body" ] || body="$(tail -25 "$2")"
+  else body="$2"; fi
+  body="${body//'%'/'%25'}"; body="${body//$'\r'/}"; body="${body//$'\n'/'%0A'}"
+  echo "::error title=$1::$body"
+}
+trap 'annotate "build-openvpn.sh" "failed at line $LINENO: $BASH_COMMAND"' ERR
+
 OPENVPN_VERSION="${OPENVPN_VERSION:-2.7.9}"
 URL="https://github.com/OpenVPN/openvpn/releases/download/v$OPENVPN_VERSION/openvpn-$OPENVPN_VERSION.tar.gz"
 
@@ -43,10 +54,19 @@ echo "==> Configuring"
   OPENSSL_LIBS="$SSL/lib/libssl.a $SSL/lib/libcrypto.a" \
   LZ4_CFLAGS="-I$LZ4/include" LZ4_LIBS="$LZ4/lib/liblz4.a" \
   LZO_CFLAGS="-I$LZO/include" LZO_LIBS="$LZO/lib/liblzo2.a" \
-  >"$SRC/openvpn-configure.log" 2>&1 || { tail -30 "$SRC/openvpn-configure.log"; exit 1; }
+  >"$SRC/openvpn-configure.log" 2>&1 || {
+    tail -30 "$SRC/openvpn-configure.log"
+    annotate "OpenVPN configure" "$SRC/openvpn-configure.log"
+    annotate "OpenVPN config.log" config.log
+    exit 1
+  }
 
 echo "==> Building"
-make -j"$(sysctl -n hw.ncpu)" >"$SRC/openvpn-make.log" 2>&1 || { tail -30 "$SRC/openvpn-make.log"; exit 1; }
+make -j"$(sysctl -n hw.ncpu)" >"$SRC/openvpn-make.log" 2>&1 || {
+  tail -30 "$SRC/openvpn-make.log"
+  annotate "OpenVPN make" "$SRC/openvpn-make.log"
+  exit 1
+}
 
 cp src/openvpn/openvpn "$OUT/openvpn"
 strip -x "$OUT/openvpn"
@@ -56,6 +76,7 @@ echo "$OPENVPN_VERSION" > "$OUT/openvpn.version"
 if otool -L "$OUT/openvpn" | grep -q /opt/homebrew; then
   echo "ERROR: openvpn still links against Homebrew libraries:" >&2
   otool -L "$OUT/openvpn" >&2
+  annotate "OpenVPN linking" "$(otool -L "$OUT/openvpn")"
   exit 1
 fi
 echo "==> $("$OUT/openvpn" --version | head -1)"
