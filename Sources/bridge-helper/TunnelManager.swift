@@ -339,6 +339,7 @@ final class TunnelManager {
 
     /// Removes leftovers of a previous helper instance (crash, kill -9, upgrade).
     func recoverFromPreviousRun() {
+        dns.recoverOverride()
         guard let data = FileManager.default.contents(atPath: statePath),
               let entries = try? JSONDecoder.bridge.decode([PersistedTunnel].self, from: data),
               !entries.isEmpty else { return }
