@@ -162,15 +162,19 @@ final class TunnelManager {
             // Pin the route to each server *before* the tunnel routes capture it.
             let allAllowed = config.peers.flatMap(\.allowedIPs)
             var uplinkInterface: String?
+            let ours = ourInterfaces
             for (_, endpoint) in resolved {
                 let ip = endpoint.address
-                guard let current = Routes.lookup("\(ip)", ipv6: ip.isIPv6) else {
+                guard var path = Routes.lookup("\(ip)", ipv6: ip.isIPv6) else {
                     throw HelperError("No route to server \(ip). Is the network up?")
                 }
-                uplinkInterface = uplinkInterface ?? current.interface
-                if allAllowed.contains(where: { $0.contains(ip) }) {
-                    let pin = RouteEntry(destination: "\(ip)", ipv6: ip.isIPv6, gateway: current.gateway,
-                                         interface: current.gateway == nil ? current.interface : nil)
+                // The server must be reached directly, never inside another Bridge tunnel.
+                let throughTunnel = path.interface.map(ours.contains) ?? false
+                if throughTunnel, !ip.isIPv6, let uplink = Routes.uplink(excluding: ours) { path = uplink }
+                uplinkInterface = uplinkInterface ?? path.interface
+                if throughTunnel || allAllowed.contains(where: { $0.contains(ip) }) {
+                    let pin = RouteEntry(destination: "\(ip)", ipv6: ip.isIPv6, gateway: path.gateway,
+                                         interface: path.gateway == nil ? path.interface : nil)
                     if try Routes.add(pin) { tunnel.routes.append(pin) }
                 }
             }
@@ -215,7 +219,8 @@ final class TunnelManager {
                 tunnel.warnings.append(warning)
             }
             log("up '\(name)' done on \(backend.interface)")
-            lastUplink = Routes.uplink(excluding: [backend.interface])
+            lastUplink = Routes.uplink(excluding: ourInterfaces)
+            ensureServerPins()
             return status(of: tunnel)
         } catch {
             log("up '\(name)' failed: \(error)")
@@ -234,6 +239,16 @@ final class TunnelManager {
                                   backendPath: OpenVPNBackend.executablePath)
         tunnels[name] = tunnel
         do {
+            // Resolve every server address so they can be reached directly, not inside
+            // another tunnel (OpenVPN may connect to any of them).
+            var serverIPs: [String] = []
+            for remote in config.remotes {
+                let host = remote.split(separator: ":").first.map(String.init) ?? remote
+                for ip in Resolver.resolveAll(host) where !serverIPs.contains("\(ip)") { serverIPs.append("\(ip)") }
+            }
+            tunnel.serverIPs = serverIPs
+            ensureServerPins()
+
             let (backend, warnings) = try OpenVPNBackend.start(tunnel: name, config: config, secrets: secrets,
                                                                settings: settings) {
                 [weak self] pid in
@@ -241,6 +256,7 @@ final class TunnelManager {
             }
             tunnel.backend = backend
             tunnel.warnings += warnings
+            ensureServerPins()
             saveState()
             log("up '\(name)' done on \(backend.interface)")
             return status(of: tunnel)
@@ -385,8 +401,37 @@ final class TunnelManager {
             tunnel.routes = moved
             log("  '\(tunnel.name)' now reaches its server via \(uplink.interface ?? "?")")
         }
+        ensureServerPins()
         saveState()
         updateFirewall()
+    }
+
+    // MARK: Server routes
+
+    private var ourInterfaces: Set<String> {
+        Set(tunnels.values.compactMap { $0.backend?.interface }.filter { !$0.isEmpty })
+    }
+
+    /// Keeps every tunnel's VPN servers on the physical uplink: a server reached
+    /// through another Bridge tunnel means double encryption and a detour.
+    func ensureServerPins() {
+        let ours = ourInterfaces
+        guard let uplink = Routes.uplink(excluding: ours) else { return }
+        for tunnel in tunnels.values {
+            for server in servers(of: tunnel) {
+                guard let ip = IPAddress(server), !ip.isIPv6,
+                      !tunnel.routes.contains(where: { $0.destination == server }),
+                      let path = Routes.lookup(server, ipv6: false), let interface = path.interface,
+                      ours.contains(interface) else { continue }
+                let pin = RouteEntry(destination: server, ipv6: false, gateway: uplink.gateway,
+                                     interface: uplink.gateway == nil ? uplink.interface : nil)
+                if (try? Routes.add(pin)) == true {
+                    tunnel.routes.append(pin)
+                    log("  '\(tunnel.name)' server \(server) now goes directly via \(uplink.interface ?? "?")")
+                }
+            }
+        }
+        saveState()
     }
 
     // MARK: Status

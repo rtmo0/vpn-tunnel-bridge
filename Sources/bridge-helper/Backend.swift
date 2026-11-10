@@ -154,6 +154,30 @@ enum Resolver {
         var uapiValue: String { address.isIPv6 ? "[\(address)]:\(port)" : "\(address):\(port)" }
     }
 
+    /// Every IPv4/IPv6 address of `host` (OpenVPN may pick any of them).
+    static func resolveAll(_ host: String) -> [IPAddress] {
+        if let ip = IPAddress(host) { return [ip] }
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { return [] }
+        defer { freeaddrinfo(first) }
+        var out: [IPAddress] = []
+        var cursor: UnsafeMutablePointer<addrinfo>? = first
+        while let info = cursor {
+            var name = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(info.pointee.ai_addr, info.pointee.ai_addrlen, &name, socklen_t(name.count),
+                           nil, 0, NI_NUMERICHOST) == 0,
+               let ip = IPAddress(String(cString: name).split(separator: "%").first.map(String.init) ?? ""),
+               !out.contains(ip) {
+                out.append(ip)
+            }
+            cursor = info.pointee.ai_next
+        }
+        return out
+    }
+
     static func resolve(_ endpoint: Endpoint) throws -> Resolved {
         if let ip = IPAddress(endpoint.host) { return Resolved(address: ip, port: endpoint.port) }
 
