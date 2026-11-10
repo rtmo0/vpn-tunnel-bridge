@@ -266,7 +266,7 @@ public struct OpenVPNConfig: Equatable, Sendable {
         text += """
 
         # ---- added by Bridge ----
-        dev utun
+        dev tun
         management \(Self.quote(managementSocket)) unix
         management-hold
         management-query-passwords

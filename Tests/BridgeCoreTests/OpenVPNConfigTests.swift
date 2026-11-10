@@ -62,8 +62,10 @@ abcd
         #expect(!lines.contains { $0.hasPrefix("up /etc") })
         #expect(!lines.contains { $0.hasPrefix("down /etc") })
         #expect(!lines.contains("block-outside-dns"))
-        #expect(!lines.contains("dev tun"))
-        #expect(lines.contains("dev utun"))
+        // The user's "dev tun" is stripped and exactly one Bridge-owned "dev tun" is added
+        // (OpenVPN picks utun on macOS by itself; "dev utun" is not a valid device type).
+        #expect(lines.filter { $0 == "dev tun" }.count == 1)
+        #expect(!lines.contains("dev utun"))
         #expect(lines.contains("management /var/run/bridge/work.mgmt unix"))
         #expect(lines.contains("management-query-passwords"))
         #expect(lines.contains(#"route-up "/opt/helper openvpn-event up""#))
