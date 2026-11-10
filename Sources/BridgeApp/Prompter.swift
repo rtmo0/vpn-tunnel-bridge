@@ -2,7 +2,7 @@ import AppKit
 import BridgeClient
 
 /// Native dialogs for credentials, passphrases and one-time codes.
-@MainActor
+
 enum Prompter {
     static func ask(_ prompt: SecretPrompt) -> SecretAnswer? {
         NSApp.activate(ignoringOtherApps: true)

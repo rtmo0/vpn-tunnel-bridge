@@ -1,6 +1,5 @@
 import AppKit
 import BridgeCore
-import SwiftUI
 
 /// Menu bar glyph: a shield, drawn as a template image so macOS tints it for
 /// light and dark menu bars.
@@ -17,7 +16,7 @@ enum MenuBarIcon {
         case error
     }
 
-    static let frameCount = 4
+    static let frameCount = 8
     private static var cache: [String: NSImage] = [:]
 
     static func image(_ state: State, frame: Int = 0) -> NSImage {
@@ -112,54 +111,34 @@ enum MenuBarIcon {
     }
 }
 
-/// Monochrome protocol tile shown next to each tunnel, like account icons.
-struct ProtocolBadge: View {
-    let kind: TunnelKind
-    var size: CGFloat = 28
+/// Protocol tile for menu items: a rounded rectangle with the protocol name
+/// knocked out. Template image, so it follows the menu's highlight colour.
+enum ProtocolIcon {
+    private static var cache: [TunnelKind: NSImage] = [:]
 
-    private var shades: [Color] {
+    static func image(_ kind: TunnelKind) -> NSImage {
+        if let cached = cache[kind] { return cached }
+        let label: String
         switch kind {
-        case .amneziawg: [Color(white: 0.30), Color(white: 0.08)]
-        case .wireguard: [Color(white: 0.48), Color(white: 0.22)]
-        case .openvpn: [Color(white: 0.66), Color(white: 0.38)]
+        case .amneziawg: label = "AWG"
+        case .wireguard: label = "WG"
+        case .openvpn: label = "OVPN"
         }
-    }
-
-    private var label: String {
-        switch kind {
-        case .amneziawg: "AWG"
-        case .wireguard: "WG"
-        case .openvpn: "OVPN"
+        let size = NSSize(width: 26, height: 15)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 1), xRadius: 3.5, yRadius: 3.5).fill()
+            guard let cg = NSGraphicsContext.current?.cgContext else { return true }
+            cg.setBlendMode(.destinationOut)
+            let font = NSFont.systemFont(ofSize: label.count > 3 ? 7.2 : 8.5, weight: .heavy)
+            let text = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: NSColor.black,
+                                                                      .kern: label.count > 3 ? 0 : 0.3])
+            let textSize = text.size()
+            text.draw(at: CGPoint(x: (rect.width - textSize.width) / 2, y: (rect.height - textSize.height) / 2 + 0.3))
+            return true
         }
-    }
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-            .fill(LinearGradient(colors: shades, startPoint: .top, endPoint: .bottom))
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.6)
-            )
-            .overlay(
-                Text(label)
-                    .font(.system(size: size * (label.count > 3 ? 0.27 : 0.36), weight: .heavy))
-                    .foregroundStyle(.white)
-                    .minimumScaleFactor(0.5)
-                    .padding(.horizontal, 2)
-            )
-            .frame(width: size, height: size)
-            .shadow(color: .black.opacity(0.2), radius: 1, y: 1)
-    }
-}
-
-/// Small status light on the corner of a badge.
-struct StatusDot: View {
-    let color: Color
-
-    var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 10, height: 10)
-            .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
+        image.isTemplate = true
+        cache[kind] = image
+        return image
     }
 }

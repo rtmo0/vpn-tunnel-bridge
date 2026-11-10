@@ -3,10 +3,10 @@ import BridgeClient
 import BridgeCore
 import Foundation
 
-@MainActor
-final class AppModel: ObservableObject {
-    struct Row: Identifiable, Equatable {
-        var id: String { name }
+/// App state: saved tunnels, live statuses from the helper, and actions.
+/// Everything runs on the main thread; slow helper calls go to a background queue.
+final class AppModel {
+    struct Row: Equatable {
         let name: String
         let kind: TunnelKind
         var status: TunnelStatus?
@@ -14,49 +14,23 @@ final class AppModel: ObservableObject {
 
         static func == (a: Row, b: Row) -> Bool {
             a.name == b.name && a.kind == b.kind && a.saved == b.saved
-                && a.status?.state == b.status?.state && a.status?.rxBytes == b.status?.rxBytes
-                && a.status?.txBytes == b.status?.txBytes && a.status?.connected == b.status?.connected
+                && a.status?.state == b.status?.state && a.status?.connected == b.status?.connected
+                && a.status?.rxBytes == b.status?.rxBytes && a.status?.txBytes == b.status?.txBytes
         }
     }
 
-    @Published private(set) var rows: [Row] = [] { didSet { updateAnimation() } }
-    @Published private(set) var helper: HelperClient.Availability = .notInstalled
-    @Published private(set) var busy: Set<String> = [] { didSet { updateAnimation() } }
-    @Published var message: String?
-    @Published private(set) var installing = false
+    private(set) var rows: [Row] = []
+    private(set) var helper: HelperClient.Availability = .notInstalled
+    private(set) var busy: Set<String> = []
+    private(set) var installing = false
+    private(set) var rates: [String: (rx: Double, tx: Double)] = [:]
 
-    /// Drives the "building the bridge" animation in the menu bar.
-    @Published private(set) var animationFrame = 0
+    /// Called on the main thread whenever something visible changed.
+    var onChange: () -> Void = {}
 
-    private var timer: Timer?
-    private var animationTimer: Timer?
+    private var lastCounters: [String: (rx: UInt64, tx: UInt64, at: Date)] = [:]
     private var refreshing = false
-
-    var anyConnected: Bool { rows.contains { $0.status?.connected == true } }
-    var anyActive: Bool { rows.contains { $0.status != nil } }
-
-    var menuIconState: MenuBarIcon.State {
-        if !busy.isEmpty || rows.contains(where: { $0.status != nil && $0.status?.connected == false }) {
-            return .connecting
-        }
-        let connected = rows.filter { $0.status?.connected == true }.count
-        if connected > 0 { return .connected(count: connected) }
-        if message != nil { return .error }
-        return .disconnected
-    }
-
-    private func updateAnimation() {
-        let animate = menuIconState == .connecting
-        if animate && animationTimer == nil {
-            animationTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.animationFrame += 1 }
-            }
-        } else if !animate, let timer = animationTimer {
-            timer.invalidate()
-            animationTimer = nil
-            animationFrame = 0
-        }
-    }
+    private let work = DispatchQueue(label: "com.rtmo0.bridge.app.work", attributes: .concurrent)
 
     var helperReady: Bool {
         if case .ready = helper { return true }
@@ -68,12 +42,19 @@ final class AppModel: ObservableObject {
         return []
     }
 
-    init() {
-        refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+    var connectedRows: [Row] { rows.filter { $0.status?.connected == true } }
+
+    var iconState: MenuBarIcon.State {
+        if !busy.isEmpty || rows.contains(where: { $0.status != nil && $0.status?.connected == false }) {
+            return .connecting
         }
+        let connected = connectedRows.count
+        if connected > 0 { return .connected(count: connected) }
+        if case .outdated = helper { return .error }
+        return .disconnected
     }
+
+    // MARK: Refresh
 
     func refresh() {
         guard !refreshing else { return }
@@ -81,18 +62,14 @@ final class AppModel: ObservableObject {
         // While a connection attempt runs the helper is busy; keep the last known statuses.
         let skipStatus = !busy.isEmpty
         let previous = rows
-        Task.detached {
+        work.async {
             let saved = TunnelLibrary.list()
             let availability = HelperClient.availability()
             var statuses: [TunnelStatus]?
-            if case .ready = availability, !skipStatus {
-                statuses = try? HelperClient.statuses()
-            }
-            let fetched = statuses
-            await MainActor.run {
+            if case .ready = availability, !skipStatus { statuses = try? HelperClient.statuses() }
+            DispatchQueue.main.async {
                 self.refreshing = false
-                self.helper = availability
-                let active = fetched ?? previous.compactMap(\.status)
+                let active = statuses ?? previous.compactMap(\.status)
                 var rows = saved.map { entry in
                     Row(name: entry.name, kind: entry.kind, status: active.first { $0.name == entry.name }, saved: true)
                 }
@@ -102,67 +79,91 @@ final class AppModel: ObservableObject {
                 if case .ready = availability {} else {
                     rows = rows.map { Row(name: $0.name, kind: $0.kind, status: nil, saved: $0.saved) }
                 }
-                if rows != self.rows { self.rows = rows }
+                if statuses != nil { self.updateRates(rows) }
+                let changed = rows != self.rows || availability != self.helper
+                self.rows = rows
+                self.helper = availability
+                if changed || statuses != nil { self.onChange() }
             }
         }
+    }
+
+    private func updateRates(_ rows: [Row]) {
+        let now = Date()
+        var next: [String: (rx: UInt64, tx: UInt64, at: Date)] = [:]
+        var rates: [String: (rx: Double, tx: Double)] = [:]
+        for row in rows {
+            guard let status = row.status else { continue }
+            if let last = lastCounters[row.name], status.rxBytes >= last.rx, status.txBytes >= last.tx {
+                let dt = max(0.5, now.timeIntervalSince(last.at))
+                rates[row.name] = (Double(status.rxBytes - last.rx) / dt, Double(status.txBytes - last.tx) / dt)
+            }
+            next[row.name] = (status.rxBytes, status.txBytes, now)
+        }
+        lastCounters = next
+        self.rates = rates
     }
 
     // MARK: Connect / disconnect
 
-    func toggle(_ row: Row) {
-        if row.status != nil { disconnect(row.name) } else { connect(row.name) }
+    func toggle(_ name: String) {
+        guard !busy.contains(name) else { return }
+        if rows.first(where: { $0.name == name })?.status != nil { disconnect(name) } else { connect(name) }
     }
 
     func connect(_ name: String) {
         guard helperReady else {
-            message = "Install the Bridge helper first."
+            Alerts.show("The Bridge helper is not installed", "Choose “Install Helper…” in the Bridge menu first.")
             return
         }
-        busy.insert(name)
-        message = nil
-        Task.detached {
+        let canOpenVPN = capabilities.contains(.openvpn)
+        setBusy(name, true)
+        work.async {
             var failure: String?
             do {
                 let (text, kind) = try TunnelLibrary.load(name)
-                if kind == .openvpn, await !self.capabilities.contains(.openvpn) {
+                if kind == .openvpn && !canOpenVPN {
                     throw ClientError("OpenVPN is not included in this build of Bridge.")
                 }
                 _ = try Connector.connect(name: name, text: text, kind: kind) { prompt in
-                    DispatchQueue.main.sync { MainActor.assumeIsolated { Prompter.ask(prompt) } }
+                    DispatchQueue.main.sync { Prompter.ask(prompt) }
                 }
             } catch let error as ClientError where error.description == "Cancelled" {
                 failure = nil
             } catch {
-                failure = "\(name): \(error.localizedDescription)"
+                failure = error.localizedDescription
             }
-            let failureMessage = failure
-            await MainActor.run {
-                self.busy.remove(name)
-                if let failure = failureMessage { self.message = failure }
+            DispatchQueue.main.async {
+                self.setBusy(name, false)
+                if let failure { Alerts.show("Could not connect “\(name)”", failure) }
                 self.refresh()
             }
         }
     }
 
     func disconnect(_ name: String) {
-        busy.insert(name)
-        Task.detached {
+        setBusy(name, true)
+        work.async {
             var failure: String?
-            do { try HelperClient.disconnect(name) } catch { failure = "\(name): \(error.localizedDescription)" }
-            let failureMessage = failure
-            await MainActor.run {
-                self.busy.remove(name)
-                if let failure = failureMessage { self.message = failure }
+            do { try HelperClient.disconnect(name) } catch { failure = error.localizedDescription }
+            DispatchQueue.main.async {
+                self.setBusy(name, false)
+                if let failure { Alerts.show("Could not disconnect “\(name)”", failure) }
                 self.refresh()
             }
         }
     }
 
     func disconnectAll() {
-        Task.detached {
+        work.async {
             _ = try? HelperClient.call(HelperRequest(command: .downAll))
-            await MainActor.run { self.refresh() }
+            DispatchQueue.main.async { self.refresh() }
         }
+    }
+
+    private func setBusy(_ name: String, _ value: Bool) {
+        if value { busy.insert(name) } else { busy.remove(name) }
+        onChange()
     }
 
     // MARK: Library
@@ -170,69 +171,78 @@ final class AppModel: ObservableObject {
     func importConfigs() {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
-        panel.title = "Import VPN configuration"
-        panel.message = "Choose WireGuard / AmneziaWG (.conf) or OpenVPN (.ovpn) files"
+        panel.title = "Import Tunnels"
+        panel.message = "WireGuard / AmneziaWG (.conf) or OpenVPN (.ovpn) files"
+        panel.prompt = "Import"
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = []
-        panel.allowsOtherFileTypes = true
         guard panel.runModal() == .OK else { return }
         var errors: [String] = []
-        var imported: [String] = []
         for url in panel.urls {
-            do {
-                let saved = try TunnelLibrary.importFile(at: url)
-                imported.append(saved.name)
-            } catch {
+            do { try TunnelLibrary.importFile(at: url) } catch {
                 errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
             }
         }
-        message = errors.isEmpty ? nil : errors.joined(separator: "\n")
+        if !errors.isEmpty { Alerts.show("Some files could not be imported", errors.joined(separator: "\n")) }
         refresh()
     }
 
-    func remove(_ row: Row) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Remove “\(row.name)”?"
-        alert.informativeText = "The configuration and its saved passwords will be deleted."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        if row.status != nil { try? HelperClient.disconnect(row.name) }
-        do { try TunnelLibrary.remove(row.name) } catch { message = error.localizedDescription }
+    func remove(_ name: String) {
+        guard Alerts.confirm("Remove “\(name)”?", "The configuration and its saved passwords will be deleted.",
+                             button: "Remove") else { return }
+        if rows.first(where: { $0.name == name })?.status != nil { try? HelperClient.disconnect(name) }
+        do { try TunnelLibrary.remove(name) } catch { Alerts.show("Could not remove “\(name)”", error.localizedDescription) }
         refresh()
     }
 
-    func forgetPasswords(_ row: Row) {
-        Keychain.deleteAll(for: row.name)
+    func forgetPassword(_ name: String) { Keychain.deleteAll(for: name) }
+
+    func reveal(_ name: String) {
+        if let saved = TunnelLibrary.find(name) { NSWorkspace.shared.activateFileViewerSelecting([saved.url]) }
     }
 
-    func revealInFinder(_ row: Row) {
-        if let saved = TunnelLibrary.find(row.name) {
-            NSWorkspace.shared.activateFileViewerSelecting([saved.url])
-        }
+    func openTunnelsFolder() {
+        try? FileManager.default.createDirectory(at: TunnelLibrary.directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(TunnelLibrary.directory)
     }
 
-    func openLogs() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/var/log/bridge"))
-    }
+    func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: "/var/log/bridge")) }
 
     // MARK: Helper
 
     func installHelper() {
         installing = true
-        message = nil
-        Task.detached {
+        onChange()
+        work.async {
             var failure: String?
             do { try HelperInstaller.install() } catch { failure = error.localizedDescription }
-            let failureMessage = failure
-            await MainActor.run {
+            DispatchQueue.main.async {
                 self.installing = false
-                if let failure = failureMessage { self.message = failure }
+                if let failure { Alerts.show("Helper installation failed", failure) }
                 self.refresh()
             }
         }
+    }
+}
+
+enum Alerts {
+    static func show(_ title: String, _ text: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    static func confirm(_ title: String, _ text: String, button: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
