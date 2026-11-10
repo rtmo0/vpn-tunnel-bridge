@@ -32,6 +32,8 @@ enum ManageWindow {
         if selection.name == nil { selection.name = model.rows.first(where: \.saved)?.name }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        // A menu bar app isn't always frontmost; make sure the window is visible.
+        window?.orderFrontRegardless()
     }
 }
 
@@ -337,7 +339,8 @@ struct TunnelDetail: View {
     private var loginSection: some View {
         Section {
             TextField("Username", text: $username)
-            SecureField("Password", text: $password)
+            SecureField("Password", text: $password,
+                        prompt: Text(hasSavedLogin ? "Saved in Keychain — type to replace" : "Password"))
             HStack {
                 if hasSavedLogin {
                     Button("Forget") {
@@ -442,11 +445,11 @@ struct TunnelDetail: View {
         networksText = saved.networks.joined(separator: ", ")
         dnsText = saved.dnsServers.joined(separator: ", ")
         domainsText = saved.splitDNSDomains.joined(separator: ", ")
-        if let creds = Keychain.credentials(for: name) {
-            username = creds.username
-            password = creds.password
-            hasSavedLogin = true
-        }
+        // Never read the password here: that would show a Keychain prompt every time
+        // the window opens. Only connecting needs it.
+        hasSavedLogin = Keychain.hasCredentials(for: name)
+        username = Keychain.savedUsername(for: name) ?? ""
+        password = ""
     }
 
     private func save() {

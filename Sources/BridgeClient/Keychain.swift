@@ -16,11 +16,12 @@ public enum Keychain {
          kSecAttrAccount as String: account]
     }
 
-    private static func set(_ data: Data, account: String, label: String) throws {
+    private static func set(_ data: Data, account: String, label: String, generic: Data? = nil) throws {
         SecItemDelete(query(account) as CFDictionary)
         var item = query(account)
         item[kSecValueData as String] = data
         item[kSecAttrLabel as String] = label
+        if let generic { item[kSecAttrGeneric as String] = generic }
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         let status = SecItemAdd(item as CFDictionary, nil)
         guard status == errSecSuccess else {
@@ -39,7 +40,26 @@ public enum Keychain {
 
     public static func saveCredentials(username: String, password: String, for tunnel: String) throws {
         let data = try JSONEncoder().encode(Credentials(username: username, password: password))
-        try set(data, account: "\(tunnel)/auth", label: "Bridge: \(tunnel)")
+        // The username is also kept as a plain attribute, readable without a Keychain prompt.
+        try set(data, account: "\(tunnel)/auth", label: "Bridge: \(tunnel)", generic: Data(username.utf8))
+    }
+
+    /// Attributes only: unlike reading the secret, this never shows a Keychain prompt.
+    private static func attributes(_ account: String) -> [String: Any]? {
+        var q = query(account)
+        q[kSecReturnAttributes as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? [String: Any]
+    }
+
+    /// Whether a password is saved, without reading it (no Keychain prompt).
+    public static func hasCredentials(for tunnel: String) -> Bool { attributes("\(tunnel)/auth") != nil }
+
+    /// The saved username, without reading the password (no Keychain prompt).
+    public static func savedUsername(for tunnel: String) -> String? {
+        (attributes("\(tunnel)/auth")?[kSecAttrGeneric as String] as? Data).map { String(decoding: $0, as: UTF8.self) }
     }
 
     public static func credentials(for tunnel: String) -> (username: String, password: String)? {
