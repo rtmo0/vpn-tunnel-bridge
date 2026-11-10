@@ -236,7 +236,12 @@ public struct OpenVPNConfig: Equatable, Sendable {
     }
 
     /// Validates a self-contained config and appends the directives Bridge needs.
-    public func prepared(tunnel: String, managementSocket: String, eventCommand: String) throws -> Prepared {
+    /// - Parameters:
+    ///   - eventCommand: command run for route-up / down (gets " up" / " down" appended).
+    ///   - dnsCommand: single executable OpenVPN 2.7 runs as `dns-updown`; it receives the
+    ///     DNS servers and domains (pushed or configured) in its environment.
+    public func prepared(tunnel: String, managementSocket: String, eventCommand: String,
+                         dnsCommand: String? = nil) throws -> Prepared {
         var kept: [Directive] = []
         var stripped = Set<String>()
 
@@ -274,7 +279,7 @@ public struct OpenVPNConfig: Equatable, Sendable {
         route-up \(Self.quote("\(eventCommand) up"))
         down \(Self.quote("\(eventCommand) down"))
         setenv BRIDGE_TUNNEL \(Self.quote(tunnel))
-        dns-updown disable
+        \(dnsCommand.map { "dns-updown \(Self.quote($0))" } ?? "dns-updown disable")
         verb 3
 
         """

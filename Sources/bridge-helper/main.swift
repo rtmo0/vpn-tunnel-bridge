@@ -7,6 +7,23 @@ import Foundation
 setvbuf(stdout, nil, _IOLBF, 0)
 signal(SIGPIPE, SIG_IGN)
 
+// OpenVPN 2.7 runs `bridge-helper` (no arguments) as its dns-updown command with
+// script_type=dns-up|dns-down and the DNS settings in the environment. The tunnel
+// is identified by the parent process, which is that tunnel's openvpn.
+if let scriptType = ProcessInfo.processInfo.environment["script_type"],
+   scriptType == "dns-up" || scriptType == "dns-down" {
+    var env = ProcessInfo.processInfo.environment.filter { key, _ in key == "dev" || key.hasPrefix("dns_") }
+    env["BRIDGE_PPID"] = String(getppid())
+    let request = HelperRequest(command: .openvpnEvent, event: scriptType, environment: env)
+    if let fd = try? UnixSocket.connect(path: HelperProtocol.socketPath, timeout: 10),
+       let data = try? JSONEncoder.bridge.encode(request) {
+        try? UnixSocket.writeAll(fd, String(decoding: data, as: UTF8.self) + "\n")
+        _ = try? UnixSocket.read(fd, until: "\n")
+        close(fd)
+    }
+    exit(0)
+}
+
 // `bridge-helper openvpn-event up|down` is the route-up/down hook that OpenVPN
 // runs (as root). It forwards the event and OpenVPN's environment to the daemon.
 if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event" {
@@ -105,11 +122,12 @@ func serve(_ fd: Int32) {
     }
     if request.command == .openvpnEvent {
         // Comes from OpenVPN while `up` may still hold the manager queue.
-        guard uid == 0, let name = request.name, let event = request.event else {
+        guard uid == 0, let event = request.event else {
             reply(.failure("Not allowed"))
             return
         }
-        reply(OpenVPNRegistry.shared.handleEvent(tunnel: name, event: event, environment: request.environment ?? [:]))
+        reply(OpenVPNRegistry.shared.handleEvent(tunnel: request.name, event: event,
+                                                 environment: request.environment ?? [:]))
         return
     }
     let response = manager.queue.sync { manager.handle(request) }

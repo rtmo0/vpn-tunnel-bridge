@@ -311,7 +311,8 @@ final class TunnelManager {
                 server: s.remote ?? tunnel.openVPN?.remotes.first,
                 addresses: [s.localIP, s.localIPv6].compactMap { $0 },
                 dnsServers: dns.servers(for: tunnel.name), fullTunnel: tunnel.routesAllTraffic,
-                lastHandshake: nil, rxBytes: s.rx, txBytes: s.tx, peers: [], warnings: tunnel.warnings)
+                lastHandshake: nil, rxBytes: s.rx, txBytes: s.tx, peers: [],
+                warnings: tunnel.warnings + [backend.dnsWarning].compactMap { $0 })
         }
         return TunnelStatus(name: tunnel.name, kind: tunnel.kind, interface: "", pid: 0, startedAt: tunnel.startedAt,
                             connected: false, state: "Starting", server: nil, addresses: [], dnsServers: [],

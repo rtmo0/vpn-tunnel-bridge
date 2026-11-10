@@ -26,6 +26,56 @@ final class OpenVPNBackend: TunnelBackend {
     private var _failure: (code: HelperErrorCode?, message: String, detail: String?)?
     private var _connectedOnce = false
 
+    // DNS arrives from the dns-updown hook, routes from route-up; whichever comes
+    // second applies DNS.
+    struct PendingDNS {
+        var servers: [String]
+        var domains: [String]
+        var splitDomainsOnly: Bool
+    }
+    private var _pendingDNS: PendingDNS?
+    private var _routesReady = false
+    private var _dnsSplitSetting = false
+    private var _ipv4: [String] = []
+    private var _ipv6: [(String, Int)] = []
+    private var _dnsWarning: String?
+
+    var dnsWarning: String? { locked { _dnsWarning } }
+
+    func setDNS(_ dns: PendingDNS?) -> Bool {
+        locked {
+            _pendingDNS = dns
+            return _routesReady
+        }
+    }
+
+    func setRoutes(interface: String, full: Bool, split: Bool, ipv4: [String], ipv6: [(String, Int)]) -> Bool {
+        locked {
+            _interface = interface
+            _fullTunnel = full
+            _dnsSplitSetting = split
+            _ipv4 = ipv4
+            _ipv6 = ipv6
+            _routesReady = true
+            return _pendingDNS != nil
+        }
+    }
+
+    /// Publishes DNS once both servers and routes are known.
+    func applyDNS() {
+        let (dns, interface, full, split, ipv4, ipv6) = locked {
+            (_pendingDNS, _interface, _fullTunnel, _dnsSplitSetting, _ipv4, _ipv6)
+        }
+        guard let dns, !dns.servers.isEmpty else { return }
+        // Split DNS (per Bridge settings or OpenVPN resolve-domains): only those domains.
+        let primary = full && !split && !dns.splitDomainsOnly
+        let settings = DNSSettings(servers: dns.servers, searchDomains: dns.domains, fullTunnel: primary,
+                                   interface: interface, ipv4Addresses: ipv4, ipv6Addresses: ipv6)
+        let warning = DNSManager.shared.apply(tunnel: tunnel, settings)
+        locked { _dnsWarning = warning }
+        if let warning { log("  note: \(warning)") }
+    }
+
     var pid: Int32 { process.processIdentifier }
     var isRunning: Bool { process.isRunning }
 
@@ -89,7 +139,7 @@ final class OpenVPNBackend: TunnelBackend {
 
         let helperPath = AmneziaBackend.helperExecutablePath
         let prepared = try config.prepared(tunnel: tunnel, managementSocket: managementPath,
-                                           eventCommand: "\(helperPath) openvpn-event")
+                                           eventCommand: "\(helperPath) openvpn-event", dnsCommand: helperPath)
         FileManager.default.createFile(atPath: configPath, contents: Data(prepared.text.utf8),
                                        attributes: [.posixPermissions: 0o600])
 
@@ -350,48 +400,68 @@ final class OpenVPNRegistry {
         return backends[tunnel]
     }
 
-    /// Handles `bridge-helper openvpn-event up|down` sent by OpenVPN.
-    func handleEvent(tunnel: String, event: String, environment env: [String: String]) -> HelperResponse {
-        guard let backend = backend(tunnel) else { return .failure("Unknown OpenVPN tunnel '\(tunnel)'") }
+    func backend(pid: Int32) -> OpenVPNBackend? {
+        lock.lock()
+        defer { lock.unlock() }
+        return backends.values.first { $0.pid == pid }
+    }
+
+    /// Handles hooks run by OpenVPN:
+    /// - `up` / `down`: route-up and down (`bridge-helper openvpn-event …`, tunnel from BRIDGE_TUNNEL)
+    /// - `dns-up` / `dns-down`: dns-updown (`bridge-helper`, tunnel found by the parent pid)
+    func handleEvent(tunnel name: String?, event: String, environment env: [String: String]) -> HelperResponse {
+        let found: OpenVPNBackend?
+        if let name {
+            found = backend(name)
+        } else if let ppid = env["BRIDGE_PPID"].flatMap(Int32.init) {
+            found = backend(pid: ppid)
+        } else {
+            found = nil
+        }
+        guard let backend = found else { return .failure("Unknown OpenVPN tunnel") }
+        let tunnel = backend.tunnel
+
         switch event {
         case "up":
             let dev = env["dev"] ?? ""
-            backend.interface = dev
             // After route-up, a full tunnel sends public destinations to the tunnel device.
             let full = Routes.lookup("1.1.1.1", ipv6: false)?.interface == dev
-            backend.fullTunnel = full
-
-            var servers: [String] = []
-            var domains: [String] = []
-            for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-                if key.hasPrefix("foreign_option_") {
-                    let parts = value.split(separator: " ").map(String.init)
-                    guard parts.count >= 3, parts[0] == "dhcp-option" else { continue }
-                    switch parts[1].uppercased() {
-                    case "DNS", "DNS6": servers.append(parts[2])
-                    case "DOMAIN", "DOMAIN-SEARCH", "ADAPTER_DOMAIN_SUFFIX": domains.append(parts[2])
-                    default: break
-                    }
-                } else if key.hasPrefix("dns_server_"), key.contains("_address_") {
-                    servers.append(value.split(separator: " ").first.map(String.init) ?? value)
-                } else if key.hasPrefix("dns_search_domain_") {
-                    domains.append(value)
-                }
-            }
-            servers = servers.filter { IPAddress($0) != nil }.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
-            domains = domains.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
-
             var ipv6: [(String, Int)] = []
             if let v6 = env["ifconfig_ipv6_local"] { ipv6.append((v6, Int(env["ifconfig_ipv6_netbits"] ?? "") ?? 64)) }
-            // Split DNS: the tunnel's resolver only answers the configured domains.
-            let dnsPrimary = full && env["BRIDGE_DNS_SPLIT"] != "1"
-            let settings = DNSSettings(servers: servers, searchDomains: domains, fullTunnel: dnsPrimary, interface: dev,
-                                       ipv4Addresses: env["ifconfig_local"].map { [$0] } ?? [], ipv6Addresses: ipv6)
-            log("openvpn '\(tunnel)' route-up on \(dev)\(full ? " (all traffic)" : "")")
-            if let warning = DNSManager.shared.apply(tunnel: tunnel, settings) { log("  note: \(warning)") }
-        case "down":
-            log("openvpn '\(tunnel)' down")
+            log("openvpn '\(tunnel)' route-up on \(dev)\(full ? " (all traffic)" : " (selected networks)")")
+            let haveDNS = backend.setRoutes(interface: dev, full: full, split: env["BRIDGE_DNS_SPLIT"] == "1",
+                                            ipv4: env["ifconfig_local"].map { [$0] } ?? [], ipv6: ipv6)
+            if haveDNS { backend.applyDNS() }
+
+        case "dns-up":
+            var servers: [String] = []
+            var domains: [String] = []
+            var splitOnly = false
+            for (key, value) in env.sorted(by: { $0.key < $1.key }) {
+                if key.hasPrefix("dns_server_"), key.contains("_address_") {
+                    // "1.2.3.4", "1.2.3.4 53", "[fd00::1]:53" …
+                    var address = String(value.split(separator: " ").first ?? "")
+                    if address.hasPrefix("["), let close = address.firstIndex(of: "]") {
+                        address = String(address[address.index(after: address.startIndex)..<close])
+                    }
+                    if IPAddress(address) != nil, !servers.contains(address) { servers.append(address) }
+                } else if key.hasPrefix("dns_server_"), key.contains("_resolve_domain_") {
+                    splitOnly = true
+                    if !domains.contains(value) { domains.append(value) }
+                } else if key.hasPrefix("dns_search_domain_") {
+                    if !domains.contains(value) { domains.append(value) }
+                }
+            }
+            log("openvpn '\(tunnel)' dns-up: \(servers.isEmpty ? "no servers" : servers.joined(separator: ", "))"
+                + (domains.isEmpty ? "" : " for \(domains.joined(separator: ", "))"))
+            let routesReady = backend.setDNS(OpenVPNBackend.PendingDNS(servers: servers, domains: domains, splitDomainsOnly: splitOnly))
+            if routesReady { backend.applyDNS() }
+
+        case "down", "dns-down":
+            log("openvpn '\(tunnel)' \(event)")
+            _ = backend.setDNS(nil)
             DNSManager.shared.remove(tunnel: tunnel)
+
         default:
             return .failure("Unknown event '\(event)'")
         }

@@ -78,6 +78,17 @@ abcd
         #expect(try OpenVPNConfig.parse(prepared.text).has("management-hold"))
     }
 
+    @Test func registersDNSHook() throws {
+        let config = try OpenVPNConfig.parse("client\nremote a 1194\ndns-updown /tmp/evil.sh\n")
+        let lines = try config.prepared(tunnel: "t", managementSocket: "/m", eventCommand: "/h openvpn-event",
+                                        dnsCommand: "/Library/PrivilegedHelperTools/x/bridge-helper")
+            .text.components(separatedBy: "\n")
+        // The user's dns-updown is dropped; Bridge's helper is the only DNS hook.
+        #expect(!lines.contains("dns-updown /tmp/evil.sh"))
+        #expect(lines.contains("dns-updown /Library/PrivilegedHelperTools/x/bridge-helper"))
+        #expect(lines.filter { $0.hasPrefix("dns-updown") }.count == 1)
+    }
+
     @Test func rejectsUnsafeOrUnsupported() throws {
         let withFile = try OpenVPNConfig.parse("client\nremote a 1194\nca /etc/ssl/ca.pem\n")
         #expect(throws: ConfigError.self) {
