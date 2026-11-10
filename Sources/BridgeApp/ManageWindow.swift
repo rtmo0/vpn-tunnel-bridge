@@ -18,8 +18,7 @@ enum ManageWindow {
         if window == nil {
             let root = ManageView().environmentObject(model).environmentObject(selection)
             let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-            window.title = "Bridge"
-            window.subtitle = "Tunnels"
+            window.title = "Tunnels"
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             window.toolbarStyle = .unified
             window.setContentSize(NSSize(width: 820, height: 580))
@@ -123,7 +122,7 @@ struct ConfigSummary {
     var servers = ""
     var routes = ""
     var mtu = ""
-    var obfuscation = ""
+    var parameters: [(name: String, value: String)] = []
     var login = ""
     var needsLogin = false
     var warnings: [String] = []
@@ -138,8 +137,9 @@ struct ConfigSummary {
             servers = c.peers.compactMap { $0.endpoint?.description }.joined(separator: ", ")
             routes = c.peers.flatMap(\.allowedIPs).map(\.description).joined(separator: ", ")
             mtu = c.mtu.map(String.init) ?? "Automatic"
-            let names = c.deviceParameters.filter { !["ListenPort", "FwMark"].contains($0.name) }
-            obfuscation = names.isEmpty ? "None" : Self.describe(names)
+            parameters = c.deviceParameters.map { p in
+                (p.name, p.isSecret ? "••••••••" : (p.value.count > 28 ? "\(p.value.prefix(24))…" : p.value))
+            }
             warnings = c.warnings
         case .openvpn:
             guard let c = try? OpenVPNConfig.parse(text) else { return }
@@ -152,14 +152,6 @@ struct ConfigSummary {
             if c.hasEncryptedPrivateKey { login.append("key passphrase") }
             self.login = login.joined(separator: " + ")
         }
-    }
-
-    private static func describe(_ params: [TunnelConfig.DeviceParameter]) -> String {
-        params.map { p in
-            if p.isSecret { return "\(p.name) ✓" }
-            if p.value.count > 12 { return "\(p.name) ✓" }
-            return "\(p.name) \(p.value)"
-        }.joined(separator: " · ")
     }
 }
 
@@ -199,22 +191,13 @@ struct TunnelDetail: View {
     private var dirty: Bool { draft != saved }
 
     var body: some View {
-        Form {
+        VStack(spacing: 0) {
             header
-            if let status = row?.status { statusSection(status) }
-            configurationSection
-            if summary?.needsLogin == true { loginSection }
-            routingSection
-            dnsSection
-            if let error {
-                Section {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
-                }
-            }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+            Divider()
+            form
         }
-        .formStyle(.grouped)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if dirty {
@@ -238,10 +221,27 @@ struct TunnelDetail: View {
         .onAppear(perform: load)
     }
 
+    private var form: some View {
+        Form {
+            if let status = row?.status { statusSection(status) }
+            configurationSection
+            if summary?.needsLogin == true { loginSection }
+            routingSection
+            dnsSection
+            if let error {
+                Section {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
     // MARK: Sections
 
     private var header: some View {
-        Section {
             HStack(spacing: 12) {
                 Image(nsImage: ProtocolIcon.image(summary?.kind ?? row?.kind ?? .wireguard))
                     .renderingMode(.template)
@@ -278,8 +278,6 @@ struct TunnelDetail: View {
                         .disabled(!model.helperReady)
                 }
             }
-            .padding(.vertical, 4)
-        }
     }
 
     private var stateText: String {
@@ -316,9 +314,11 @@ struct TunnelDetail: View {
                 if !s.dns.isEmpty { LabeledContent("DNS", value: s.dns) }
                 if !s.routes.isEmpty { LabeledContent("Routes", value: s.routes) }
                 if s.kind != .openvpn { LabeledContent("MTU", value: s.mtu) }
-                if s.kind == .amneziawg {
-                    LabeledContent("Obfuscation") {
-                        Text(s.obfuscation).multilineTextAlignment(.trailing).font(.callout.monospaced())
+                if !s.parameters.isEmpty {
+                    DisclosureGroup("AmneziaWG parameters (\(s.parameters.count))") {
+                        ForEach(s.parameters, id: \.name) { p in
+                            LabeledContent(p.name) { Text(p.value).font(.callout.monospaced()) }
+                        }
                     }
                 }
                 if s.kind == .openvpn { LabeledContent("Sign-in", value: s.login) }
@@ -363,6 +363,7 @@ struct TunnelDetail: View {
         } footer: {
             Text("Stored in your login keychain. Leave empty to be asked when connecting.")
                 .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -385,12 +386,13 @@ struct TunnelDetail: View {
             Text("Routing")
         } footer: {
             Text(routingFooter).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var routingFooter: String {
         switch settings.routing {
-        case .config: "Uses AllowedIPs from the config or the routes the OpenVPN server pushes."
+        case .config: summary?.kind == .openvpn ? "Uses the routes the OpenVPN server pushes." : "Uses AllowedIPs from the configuration."
         case .allTraffic: "Everything goes through the tunnel."
         case .onlyListed: "Split tunnelling: only these networks use the VPN, everything else goes direct."
         case .allExceptListed: "These networks go direct, everything else uses the VPN."
@@ -417,6 +419,7 @@ struct TunnelDetail: View {
         } footer: {
             Text("“Only for domains” is split DNS: the VPN's DNS answers just these domains, the rest uses your normal DNS.")
                 .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

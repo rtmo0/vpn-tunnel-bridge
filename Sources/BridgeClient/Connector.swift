@@ -33,10 +33,15 @@ public enum HelperClient {
         case notInstalled
     }
 
-    public static func availability() -> Availability {
+    /// - Parameter expectedBuild: the app's version; a helper installed by another
+    ///   version of the app is reported as outdated.
+    public static func availability(expectedBuild: String? = nil) -> Availability {
         guard let response = try? send(HelperRequest(command: .ping), timeout: 3) else { return .notInstalled }
         let version = response.helperVersion ?? 1
         if version != HelperProtocol.version { return .outdated(installed: version) }
+        if let expectedBuild, let build = response.helperBuild, build != expectedBuild {
+            return .outdated(installed: version)
+        }
         return .ready(capabilities: response.capabilities ?? [.amneziawg, .wireguard])
     }
 

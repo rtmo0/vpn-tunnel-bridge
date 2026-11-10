@@ -128,6 +128,8 @@ public struct HelperResponse: Codable, Sendable {
     public var errorDetail: String?
     public var tunnels: [TunnelStatus]?
     public var helperVersion: Int?
+    /// Version of the app that installed the helper (from its `version` file).
+    public var helperBuild: String?
     public var capabilities: [TunnelKind]?
 
     public init(ok: Bool, error: String? = nil, errorCode: HelperErrorCode? = nil, errorDetail: String? = nil,

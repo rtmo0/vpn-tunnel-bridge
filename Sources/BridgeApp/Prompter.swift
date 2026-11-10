@@ -90,7 +90,8 @@ enum HelperInstaller {
         func appleScriptQuote(_ s: String) -> String {
             "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
-        let command = "\(shellQuote(script)) \(shellQuote(resources.path))"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let command = "\(shellQuote(script)) \(shellQuote(resources.path)) \(shellQuote(version))"
         let source = "do shell script \(appleScriptQuote(command)) with prompt "
             + "\"Bridge needs to install its network helper.\" with administrator privileges"
 

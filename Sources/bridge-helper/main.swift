@@ -46,6 +46,9 @@ do {
 log(OpenVPNBackend.isAvailable ? "OpenVPN backend: \(OpenVPNBackend.executablePath)" : "OpenVPN backend not installed")
 
 let manager = TunnelManager()
+let installedBuild = (try? String(contentsOfFile: URL(fileURLWithPath: AmneziaBackend.helperExecutablePath)
+    .deletingLastPathComponent().appendingPathComponent("version").path, encoding: .utf8))?
+    .trimmingCharacters(in: .whitespacesAndNewlines)
 manager.queue.sync { manager.recoverFromPreviousRun() }
 
 // Disconnect everything cleanly when launchd stops us.
@@ -95,7 +98,9 @@ func serve(_ fd: Int32) {
     }
     if request.command == .ping {
         // Answered without the manager queue so clients don't time out while a tunnel connects.
-        reply(HelperResponse(ok: true, capabilities: manager.capabilities))
+        var response = HelperResponse(ok: true, capabilities: manager.capabilities)
+        response.helperBuild = installedBuild
+        reply(response)
         return
     }
     if request.command == .openvpnEvent {

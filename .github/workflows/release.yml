@@ -1,0 +1,71 @@
+# Builds Bridge.app and publishes a GitHub Release for every v* tag.
+# The app's updater downloads Bridge.zip from the latest release and checks
+# it against Bridge.zip.sha256.
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without v), e.g. 0.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install build dependencies
+        run: brew install openssl@3 lz4 lzo pkgconf
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          go version
+
+      - name: Test
+        run: swift test
+
+      - name: Build OpenVPN
+        run: scripts/build-openvpn.sh
+
+      - name: Build Bridge.app
+        run: |
+          export VERSION="${VERSION#v}"
+          scripts/build.sh
+
+      - name: Package
+        run: |
+          cd build
+          ditto -c -k --keepParent Bridge.app Bridge.zip
+          shasum -a 256 Bridge.zip | awk '{print $1}' > Bridge.zip.sha256
+          cat Bridge.zip.sha256
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION#v}"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG" && git push origin "$TAG"
+          fi
+          gh release create "$TAG" build/Bridge.zip build/Bridge.zip.sha256 \
+            --title "Bridge ${TAG#v}" --generate-notes --verify-tag

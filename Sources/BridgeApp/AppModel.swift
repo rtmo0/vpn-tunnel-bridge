@@ -69,7 +69,7 @@ final class AppModel: ObservableObject {
         let previous = rows
         work.async {
             let saved = TunnelLibrary.list()
-            let availability = HelperClient.availability()
+            let availability = HelperClient.availability(expectedBuild: Updater.currentVersion)
             var statuses: [TunnelStatus]?
             if case .ready = availability, !skipStatus { statuses = try? HelperClient.statuses() }
             DispatchQueue.main.async {
@@ -251,6 +251,14 @@ enum Alerts {
         alert.messageText = title
         alert.informativeText = text
         alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    static func info(_ title: String, _ text: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
         alert.runModal()
     }
 

@@ -122,6 +122,29 @@ enum MenuBarIcon {
 /// knocked out. Template image, so it follows the menu's highlight colour.
 enum ProtocolIcon {
     private static var cache: [TunnelKind: NSImage] = [:]
+    private static var loadingCache: [Int: NSImage] = [:]
+
+    /// Same size as the protocol tiles: an outlined tile with three dots that
+    /// light up one after another. Used while a tunnel connects.
+    static func loading(frame: Int) -> NSImage {
+        let step = frame % 4
+        if let cached = loadingCache[step] { return cached }
+        let image = NSImage(size: NSSize(width: 26, height: 15), flipped: false) { rect in
+            NSColor.black.setStroke()
+            let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1.5), xRadius: 3.5, yRadius: 3.5)
+            outline.lineWidth = 1.2
+            outline.stroke()
+            for i in 0..<3 {
+                let dot = NSRect(x: 7.3 + CGFloat(i) * 4.4, y: 6, width: 2.6, height: 2.6)
+                NSColor.black.withAlphaComponent(i < step ? 1 : 0.25).setFill()
+                NSBezierPath(ovalIn: dot).fill()
+            }
+            return true
+        }
+        image.isTemplate = true
+        loadingCache[step] = image
+        return image
+    }
 
     static func image(_ kind: TunnelKind) -> NSImage {
         if let cached = cache[kind] { return cached }

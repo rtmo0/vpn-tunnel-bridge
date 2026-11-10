@@ -6,6 +6,8 @@ import BridgeCore
 /// Shimo menus: status on top, tunnels you click to connect, then actions.
 final class MenuController: NSObject, NSMenuDelegate {
     private let model: AppModel
+    private let updater = Updater()
+    private var updateItem: NSMenuItem?
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private var refreshTimer: Timer?
@@ -15,11 +17,19 @@ final class MenuController: NSObject, NSMenuDelegate {
     private var lastStructure = ""
     private var statusLineItem: NSMenuItem?
     private var detailItems: [String: NSMenuItem] = [:]
+    private var busyItems: [NSMenuItem] = []
 
     /// Everything that changes which items exist (as opposed to their text).
     private var structure: String {
         let rows = model.rows.map { "\($0.name)|\($0.kind)|\($0.saved)|\($0.status?.connected ?? false)|\($0.status != nil)" }
-        return "\(rows)|\(model.busy.sorted())|\(model.helper)|\(model.installing)"
+        let update: String
+        switch updater.state {
+        case .idle, .checking: update = "none"
+        case .available: update = "available"
+        case .downloading: update = "downloading"
+        case .installing: update = "installing"
+        }
+        return "\(rows)|\(model.busy.sorted())|\(model.helper)|\(model.installing)|\(update)"
     }
 
     init(model: AppModel) {
@@ -30,8 +40,10 @@ final class MenuController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
         statusItem.button?.toolTip = "Bridge"
         model.onChange = { [weak self] in self?.update() }
+        updater.onChange = { [weak self] in self?.update() }
         update()
         model.refresh()
+        updater.start()
 
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.model.refresh() }
         RunLoop.main.add(timer, forMode: .common)
@@ -46,6 +58,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         if menuIsOpen && structure == lastStructure {
             // Only refresh text so open submenus stay open.
             statusLineItem?.title = statusLine
+            updateItem?.title = updateTitle
             for row in model.rows {
                 if let item = detailItems[row.name], let status = row.status {
                     item.attributedTitle = detailTitle(row, status)
@@ -66,6 +79,7 @@ final class MenuController: NSObject, NSMenuDelegate {
                 guard let self else { return }
                 self.animationFrame += 1
                 self.statusItem.button?.image = MenuBarIcon.image(self.model.iconState, frame: self.animationFrame)
+                for item in self.busyItems { item.image = ProtocolIcon.loading(frame: self.animationFrame) }
             }
             RunLoop.main.add(timer, forMode: .common)
             animationTimer = timer
@@ -88,10 +102,26 @@ final class MenuController: NSObject, NSMenuDelegate {
     private func rebuildMenu() {
         menu.removeAllItems()
         detailItems.removeAll()
+        busyItems.removeAll()
 
         let status = info(statusLine)
         statusLineItem = status
         menu.addItem(status)
+
+        updateItem = nil
+        switch updater.state {
+        case .idle, .checking:
+            break
+        case .available:
+            let item = action(updateTitle, #selector(installUpdate))
+            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            updateItem = item
+            menu.addItem(item)
+        case .downloading, .installing:
+            let item = info(updateTitle)
+            updateItem = item
+            menu.addItem(item)
+        }
         if model.connectedRows.count == 1, let status = model.connectedRows.first?.status, !status.addresses.isEmpty {
             menu.addItem(info("Addresses: \(status.addresses.joined(separator: ", "))"))
         }
@@ -129,6 +159,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(action("Manage Tunnels…", #selector(manageTunnels), key: ","))
 
         menu.addItem(.separator())
+        menu.addItem(action("Check for Updates…", #selector(checkUpdates)))
         menu.addItem(action("About Bridge", #selector(about)))
         menu.addItem(action("Quit Bridge", #selector(quit), key: "q"))
     }
@@ -152,8 +183,10 @@ final class MenuController: NSObject, NSMenuDelegate {
         item.representedObject = row.name
         item.image = ProtocolIcon.image(row.kind)
         item.toolTip = row.kind.displayName
-        if model.busy.contains(row.name) {
-            item.state = .mixed
+        if model.busy.contains(row.name) || (row.status != nil && row.status?.connected == false) {
+            item.image = ProtocolIcon.loading(frame: animationFrame)
+            busyItems.append(item)
+            item.state = .off
         } else if let status = row.status {
             item.state = status.connected ? .on : .mixed
         } else {
@@ -262,6 +295,19 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func remove(_ sender: Any?) { if let name = name(sender) { model.remove(name) } }
     @objc private func installHelper() { model.installHelper() }
     @objc private func manageTunnels() { ManageWindow.show(model: model) }
+    @objc private func checkUpdates() { updater.check(userInitiated: true) }
+    @objc private func installUpdate() {
+        if case let .available(release) = updater.state { updater.install(release) }
+    }
+
+    private var updateTitle: String {
+        switch updater.state {
+        case .idle, .checking: return ""
+        case let .available(release): return "Update to Bridge \(release.version)…"
+        case let .downloading(_, progress): return "Downloading update… \(Int(progress * 100))%"
+        case .installing: return "Installing update…"
+        }
+    }
 
     @objc private func about() {
         NSApp.activate(ignoringOtherApps: true)

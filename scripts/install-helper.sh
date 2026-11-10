@@ -3,7 +3,7 @@
 # Used by the app (Resources/install-helper.sh, run with administrator rights)
 # and by scripts/install.sh.
 #
-#   install-helper.sh <source-dir>          install / upgrade
+#   install-helper.sh <source-dir> [version]   install / upgrade (version: app that installs it)
 #   install-helper.sh --uninstall
 #
 # <source-dir> must contain bridge-helper and amneziawg-go; openvpn and bridge (CLI) are optional.
@@ -53,6 +53,13 @@ if [ -f "$SRC/openvpn" ]; then
   install -o root -g wheel -m 755 "$SRC/openvpn" "$DEST/openvpn"
 else
   rm -f "$DEST/openvpn"
+fi
+if [ -n "${2:-}" ]; then
+  printf '%s\n' "$2" > "$DEST/version"
+  chown root:wheel "$DEST/version"
+  chmod 644 "$DEST/version"
+else
+  rm -f "$DEST/version"
 fi
 if [ -f "$SRC/bridge" ]; then
   install -o root -g wheel -m 755 "$SRC/bridge" "$CLI"

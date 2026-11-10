@@ -12,7 +12,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/build/bin"
 APP="$ROOT/build/Bridge.app"
-VERSION="0.2.0"
+# Version: $VERSION, else the latest git tag (v1.2.3 -> 1.2.3), else 0.0.0.
+VERSION="${VERSION:-$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-0.0.0}"
 
 if [ "$(id -u)" = 0 ]; then
   echo "Run scripts/build.sh as your normal user." >&2
@@ -62,6 +64,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>BridgeUpdateRepository</key><string>rtmo0/vpn-tunnel-bridge</string>
   <key>NSHumanReadableCopyright</key><string>Tunnel Bridge. MIT License.</string>
 </dict>
 </plist>
