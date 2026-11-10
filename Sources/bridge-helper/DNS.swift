@@ -22,7 +22,7 @@ struct DNSSettings {
 
     init(config: TunnelConfig, interface: String) {
         self.init(servers: config.dnsServers.map(\.description), searchDomains: config.dnsSearchDomains,
-                  fullTunnel: config.isFullTunnel, interface: interface,
+                  fullTunnel: config.isFullTunnel && !config.dnsOnlyForDomains, interface: interface,
                   ipv4Addresses: config.addresses.filter { !$0.isIPv6 }.map { "\($0.address)" },
                   ipv6Addresses: config.addresses.filter(\.isIPv6).map { ("\($0.address)", $0.prefix) })
     }

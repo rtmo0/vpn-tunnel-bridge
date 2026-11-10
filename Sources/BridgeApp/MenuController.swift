@@ -62,7 +62,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         statusItem.button?.image = MenuBarIcon.image(state, frame: animationFrame)
         if state == .connecting {
             guard animationTimer == nil else { return }
-            let timer = Timer(timeInterval: 0.16, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 self.animationFrame += 1
                 self.statusItem.button?.image = MenuBarIcon.image(self.model.iconState, frame: self.animationFrame)
@@ -126,7 +126,7 @@ final class MenuController: NSObject, NSMenuDelegate {
             menu.addItem(action("Disconnect All", #selector(disconnectAll)))
         }
         menu.addItem(action("Import Tunnel(s) from File…", #selector(importConfigs), key: "o"))
-        menu.addItem(manageItem())
+        menu.addItem(action("Manage Tunnels…", #selector(manageTunnels), key: ","))
 
         menu.addItem(.separator())
         menu.addItem(action("About Bridge", #selector(about)))
@@ -261,6 +261,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func forget(_ sender: Any?) { if let name = name(sender) { model.forgetPassword(name) } }
     @objc private func remove(_ sender: Any?) { if let name = name(sender) { model.remove(name) } }
     @objc private func installHelper() { model.installHelper() }
+    @objc private func manageTunnels() { ManageWindow.show(model: model) }
 
     @objc private func about() {
         NSApp.activate(ignoringOtherApps: true)

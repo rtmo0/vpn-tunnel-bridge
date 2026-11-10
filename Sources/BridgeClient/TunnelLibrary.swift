@@ -119,7 +119,64 @@ public enum TunnelLibrary {
     public static func remove(_ name: String) throws {
         guard let saved = find(name) else { throw ClientError("No saved tunnel named '\(name)'") }
         try FileManager.default.removeItem(at: saved.url)
+        try? FileManager.default.removeItem(at: settingsURL(name))
         Keychain.deleteAll(for: name)
+    }
+
+    // MARK: Settings (routing / DNS overrides)
+
+    static func settingsURL(_ name: String) -> URL { directory.appendingPathComponent("\(name).bridge.json") }
+
+    public static func settings(for name: String) -> TunnelSettings {
+        guard let data = try? Data(contentsOf: settingsURL(name)),
+              let settings = try? JSONDecoder().decode(TunnelSettings.self, from: data) else { return TunnelSettings() }
+        return settings
+    }
+
+    public static func saveSettings(_ settings: TunnelSettings, for name: String) throws {
+        try settings.validate()
+        let url = settingsURL(name)
+        if settings.isDefault {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(settings).write(to: url, options: .atomic)
+    }
+
+    // MARK: Editing
+
+    /// Validates and saves an edited configuration, keeping the tunnel's name.
+    public static func updateConfig(_ text: String, for name: String) throws -> SavedTunnel {
+        let kind = TunnelKind.detect(text)
+        switch kind {
+        case .amneziawg, .wireguard: _ = try TunnelConfig.parse(text)
+        case .openvpn:
+            let config = try OpenVPNConfig.parse(text)
+            _ = try config.prepared(tunnel: name, managementSocket: "/dev/null", eventCommand: "true")
+        }
+        return try save(text, kind: kind, as: name)
+    }
+
+    /// Renames a tunnel together with its settings and saved passwords.
+    public static func rename(_ name: String, to newName: String) throws -> SavedTunnel {
+        guard TunnelName.isValid(newName) else {
+            throw ClientError("Use letters, digits, “-”, “_” and “.” (up to 40 characters)")
+        }
+        guard find(newName) == nil else { throw ClientError("A tunnel named “\(newName)” already exists") }
+        let (text, kind) = try load(name)
+        let saved = try save(text, kind: kind, as: newName)
+        if FileManager.default.fileExists(atPath: settingsURL(name).path) {
+            try? FileManager.default.moveItem(at: settingsURL(name), to: settingsURL(newName))
+        }
+        if let creds = Keychain.credentials(for: name) {
+            try? Keychain.saveCredentials(username: creds.username, password: creds.password, for: newName)
+        }
+        if let passphrase = Keychain.passphrase(for: name) { try? Keychain.savePassphrase(passphrase, for: newName) }
+        if let old = list().first(where: { $0.name == name }) { try? FileManager.default.removeItem(at: old.url) }
+        Keychain.deleteAll(for: name)
+        return saved
     }
 }
 

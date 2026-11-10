@@ -5,7 +5,7 @@ import BridgeCore
 /// light and dark menu bars.
 ///
 /// - disconnected: empty outline
-/// - connecting: the shield fills from the bottom (animated)
+/// - connecting: outline with dots appearing one by one (animated)
 /// - connected: solid shield with a check mark, or the number of connected tunnels
 /// - error: outline with an exclamation mark
 enum MenuBarIcon {
@@ -16,7 +16,7 @@ enum MenuBarIcon {
         case error
     }
 
-    static let frameCount = 8
+    static let frameCount = 4
     private static var cache: [String: NSImage] = [:]
 
     static func image(_ state: State, frame: Int = 0) -> NSImage {
@@ -69,14 +69,21 @@ enum MenuBarIcon {
             strokeOutline()
 
         case .connecting:
+            // Outline with three dots appearing one by one, like a loading indicator.
             strokeOutline()
-            // Never completely full, so it can't be mistaken for "connected".
-            let progress = CGFloat(frame + 1) / CGFloat(frameCount + 1)
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(rect: NSRect(x: 0, y: 0, width: 18, height: 1 + 16 * progress)).addClip()
+            let visible = frame % frameCount  // 0…3 dots
             NSColor.black.setFill()
-            outline.fill()
-            NSGraphicsContext.restoreGraphicsState()
+            for i in 0..<3 {
+                let x = 5.2 + CGFloat(i) * 2.8
+                let dot = NSBezierPath(ovalIn: NSRect(x: x, y: 8.3, width: 1.9, height: 1.9))
+                if i < visible {
+                    dot.fill()
+                } else {
+                    NSColor.black.withAlphaComponent(0.25).setFill()
+                    dot.fill()
+                    NSColor.black.setFill()
+                }
+            }
 
         case let .connected(count):
             NSColor.black.setFill()

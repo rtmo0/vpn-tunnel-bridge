@@ -70,7 +70,8 @@ final class TunnelManager {
                     return .failure("Invalid tunnel name", code: .invalidConfig)
                 }
                 guard let text = request.config else { return .failure("No configuration supplied", code: .invalidConfig) }
-                let status = try up(name: name, configText: text, secrets: request.secrets ?? TunnelSecrets())
+                let status = try up(name: name, configText: text, secrets: request.secrets ?? TunnelSecrets(),
+                                    settings: request.settings ?? TunnelSettings())
                 return HelperResponse(ok: true, tunnels: [status])
             case .down:
                 guard let name = request.name else { return .failure("No tunnel name") }
@@ -93,19 +94,22 @@ final class TunnelManager {
 
     // MARK: Up
 
-    private func up(name: String, configText: String, secrets: TunnelSecrets) throws -> TunnelStatus {
+    private func up(name: String, configText: String, secrets: TunnelSecrets,
+                    settings: TunnelSettings) throws -> TunnelStatus {
         guard tunnels[name] == nil else {
             throw CodedError(code: .alreadyConnected, message: "Tunnel '\(name)' is already connected", detail: nil)
         }
         let kind = TunnelKind.detect(configText)
         switch kind {
         case .amneziawg, .wireguard:
-            return try upWireGuard(name: name, config: try TunnelConfig.parse(configText))
+            let (config, bypass) = try TunnelConfig.parse(configText).applying(settings)
+            return try upWireGuard(name: name, config: config, bypass: bypass)
         case .openvpn:
             guard OpenVPNBackend.isAvailable else {
                 throw CodedError(code: .unsupported, message: "OpenVPN is not installed with this Bridge build", detail: nil)
             }
-            return try upOpenVPN(name: name, config: try OpenVPNConfig.parse(configText), secrets: secrets)
+            return try upOpenVPN(name: name, config: try OpenVPNConfig.parse(configText).applying(settings),
+                                 secrets: secrets)
         }
     }
 
@@ -114,7 +118,7 @@ final class TunnelManager {
         throw HelperError("'\(other.name)' already routes all traffic. Disconnect it first.")
     }
 
-    private func upWireGuard(name: String, config: TunnelConfig) throws -> TunnelStatus {
+    private func upWireGuard(name: String, config: TunnelConfig, bypass: [IPNetwork]) throws -> TunnelStatus {
         try checkFullTunnelConflict(config.isFullTunnel)
         let kind: TunnelKind = config.usesAmneziaObfuscation ? .amneziawg : .wireguard
         log("up '\(name)' (\(kind.displayName))")
@@ -143,6 +147,16 @@ final class TunnelManager {
                                          interface: current.gateway == nil ? current.interface : nil)
                     if try Routes.add(pin) { tunnel.routes.append(pin) }
                 }
+            }
+
+            // Networks excluded from the tunnel keep using the current uplink.
+            for network in bypass {
+                guard let uplink = Routes.lookup("default", ipv6: network.isIPv6) else { continue }
+                let net = network.masked
+                let entry = RouteEntry(destination: net.prefix == net.maxPrefix ? "\(net.address)" : net.description,
+                                       ipv6: net.isIPv6, gateway: uplink.gateway,
+                                       interface: uplink.gateway == nil ? uplink.interface : nil)
+                if (try? Routes.add(entry)) == true { tunnel.routes.append(entry) }
             }
             saveState()
 

@@ -5,7 +5,7 @@ import Foundation
 
 /// App state: saved tunnels, live statuses from the helper, and actions.
 /// Everything runs on the main thread; slow helper calls go to a background queue.
-final class AppModel {
+final class AppModel: ObservableObject {
     struct Row: Equatable {
         let name: String
         let kind: TunnelKind
@@ -31,6 +31,11 @@ final class AppModel {
     private var lastCounters: [String: (rx: UInt64, tx: UInt64, at: Date)] = [:]
     private var refreshing = false
     private let work = DispatchQueue(label: "com.rtmo0.bridge.app.work", attributes: .concurrent)
+
+    private func changed() {
+        objectWillChange.send()
+        onChange()
+    }
 
     var helperReady: Bool {
         if case .ready = helper { return true }
@@ -83,7 +88,7 @@ final class AppModel {
                 let changed = rows != self.rows || availability != self.helper
                 self.rows = rows
                 self.helper = availability
-                if changed || statuses != nil { self.onChange() }
+                if changed || statuses != nil { self.changed() }
             }
         }
     }
@@ -154,6 +159,20 @@ final class AppModel {
         }
     }
 
+    /// Disconnects and connects again, e.g. to apply new settings.
+    func reconnect(_ name: String) {
+        setBusy(name, true)
+        work.async {
+            try? HelperClient.disconnect(name)
+            DispatchQueue.main.async {
+                self.setBusy(name, false)
+                self.connect(name)
+            }
+        }
+    }
+
+    func isActive(_ name: String) -> Bool { rows.first { $0.name == name }?.status != nil }
+
     func disconnectAll() {
         work.async {
             _ = try? HelperClient.call(HelperRequest(command: .downAll))
@@ -163,7 +182,7 @@ final class AppModel {
 
     private func setBusy(_ name: String, _ value: Bool) {
         if value { busy.insert(name) } else { busy.remove(name) }
-        onChange()
+        changed()
     }
 
     // MARK: Library
@@ -212,7 +231,7 @@ final class AppModel {
 
     func installHelper() {
         installing = true
-        onChange()
+        changed()
         work.async {
             var failure: String?
             do { try HelperInstaller.install() } catch { failure = error.localizedDescription }

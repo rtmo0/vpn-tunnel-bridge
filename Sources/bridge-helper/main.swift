@@ -13,7 +13,7 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event"
     let env = ProcessInfo.processInfo.environment
     let wanted = env.filter { key, _ in
         key == "dev" || key.hasPrefix("foreign_option_") || key.hasPrefix("dns_") || key.hasPrefix("ifconfig_")
-            || key == "BRIDGE_TUNNEL"
+            || key.hasPrefix("BRIDGE_")
     }
     let request = HelperRequest(command: .openvpnEvent, name: env["BRIDGE_TUNNEL"],
                                 event: CommandLine.arguments[2], environment: wanted)

@@ -383,7 +383,9 @@ final class OpenVPNRegistry {
 
             var ipv6: [(String, Int)] = []
             if let v6 = env["ifconfig_ipv6_local"] { ipv6.append((v6, Int(env["ifconfig_ipv6_netbits"] ?? "") ?? 64)) }
-            let settings = DNSSettings(servers: servers, searchDomains: domains, fullTunnel: full, interface: dev,
+            // Split DNS: the tunnel's resolver only answers the configured domains.
+            let dnsPrimary = full && env["BRIDGE_DNS_SPLIT"] != "1"
+            let settings = DNSSettings(servers: servers, searchDomains: domains, fullTunnel: dnsPrimary, interface: dev,
                                        ipv4Addresses: env["ifconfig_local"].map { [$0] } ?? [], ipv6Addresses: ipv6)
             log("openvpn '\(tunnel)' route-up on \(dev)\(full ? " (all traffic)" : "")")
             if let warning = DNSManager.shared.apply(tunnel: tunnel, settings) { log("  note: \(warning)") }

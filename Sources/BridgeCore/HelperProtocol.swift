@@ -9,7 +9,7 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 2
+    public static let version = 3
 }
 
 /// Secrets supplied by the client for a single connection attempt.
@@ -40,15 +40,17 @@ public struct HelperRequest: Codable, Sendable {
     public var name: String?
     public var config: String?
     public var secrets: TunnelSecrets?
+    public var settings: TunnelSettings?
     public var event: String?
     public var environment: [String: String]?
 
     public init(command: Command, name: String? = nil, config: String? = nil, secrets: TunnelSecrets? = nil,
-                event: String? = nil, environment: [String: String]? = nil) {
+                settings: TunnelSettings? = nil, event: String? = nil, environment: [String: String]? = nil) {
         self.command = command
         self.name = name
         self.config = config
         self.secrets = secrets
+        self.settings = settings
         self.event = event
         self.environment = environment
     }

@@ -74,7 +74,9 @@ public enum Connector {
     /// - Parameter ask: returns nil when the user cancels. May be called from a background thread.
     public static func connect(name: String, text: String, kind: TunnelKind,
                                embedded: OpenVPNConfig.EmbeddedSecrets = .init(),
+                               settings: TunnelSettings? = nil,
                                ask: (SecretPrompt) -> SecretAnswer?) throws -> TunnelStatus {
+        let settings = settings ?? TunnelLibrary.settings(for: name)
         var secrets = TunnelSecrets()
         var rememberAuth = false
         var rememberKey = false
@@ -128,7 +130,8 @@ public enum Connector {
         var lastError = ClientError("Could not connect")
         for _ in 0..<4 {
             let response = try HelperClient.send(
-                HelperRequest(command: .up, name: name, config: text, secrets: kind == .openvpn ? secrets : nil))
+                HelperRequest(command: .up, name: name, config: text, secrets: kind == .openvpn ? secrets : nil,
+                              settings: settings.isDefault ? nil : settings))
             if response.ok, let status = response.tunnels?.first {
                 if rememberAuth, let user = secrets.username, let pass = secrets.password {
                     try? Keychain.saveCredentials(username: user, password: pass, for: name)

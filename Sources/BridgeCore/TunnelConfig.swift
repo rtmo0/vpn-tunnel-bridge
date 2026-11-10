@@ -28,6 +28,8 @@ public struct TunnelConfig: Equatable, Sendable {
     public var addresses: [IPNetwork] = []
     public var dnsServers: [IPAddress] = []
     public var dnsSearchDomains: [String] = []
+    /// Tunnel DNS answers only `dnsSearchDomains` (split DNS); set by TunnelSettings.
+    public var dnsOnlyForDomains = false
     public var mtu: Int?
     public var deviceParameters: [DeviceParameter] = []
     public var peers: [Peer] = []
