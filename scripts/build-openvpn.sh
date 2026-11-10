@@ -42,6 +42,14 @@ curl -fsSL "$URL" -o "$SRC/openvpn-$OPENVPN_VERSION.tar.gz"
 tar -xzf "$SRC/openvpn-$OPENVPN_VERSION.tar.gz" -C "$SRC"
 cd "$SRC/openvpn-$OPENVPN_VERSION"
 
+# A folder with only the static archives: configure double-checks libraries with
+# -llz4 / -llzo2 / -lssl, and without .dylib files next to them the linker has to
+# pick the static ones.
+STATIC="$SRC/static-libs"
+rm -rf "$STATIC"
+mkdir -p "$STATIC"
+cp "$SSL/lib/libssl.a" "$SSL/lib/libcrypto.a" "$LZ4/lib/liblz4.a" "$LZO/lib/liblzo2.a" "$STATIC/"
+
 echo "==> Configuring"
 ./configure \
   --disable-dependency-tracking \
@@ -50,10 +58,10 @@ echo "==> Configuring"
   --disable-unit-tests \
   --disable-debug \
   --enable-lz4 --enable-lzo \
-  OPENSSL_CFLAGS="-I$SSL/include" \
-  OPENSSL_LIBS="$SSL/lib/libssl.a $SSL/lib/libcrypto.a" \
-  LZ4_CFLAGS="-I$LZ4/include" LZ4_LIBS="$LZ4/lib/liblz4.a" \
-  LZO_CFLAGS="-I$LZO/include" LZO_LIBS="$LZO/lib/liblzo2.a" \
+  LDFLAGS="-L$STATIC" \
+  OPENSSL_CFLAGS="-I$SSL/include" OPENSSL_LIBS="-lssl -lcrypto" \
+  LZ4_CFLAGS="-I$LZ4/include" LZ4_LIBS="-llz4" \
+  LZO_CFLAGS="-I$LZO/include" LZO_LIBS="-llzo2" \
   >"$SRC/openvpn-configure.log" 2>&1 || {
     tail -30 "$SRC/openvpn-configure.log"
     annotate "OpenVPN configure" "$SRC/openvpn-configure.log"
