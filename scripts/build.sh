@@ -65,7 +65,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>BridgeUpdateRepository</key><string>rtmo0/vpn-tunnel-bridge</string>
-  <key>NSHumanReadableCopyright</key><string>MIT License</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Andrey Samarin. MIT License.</string>
 </dict>
 </plist>
 PLIST

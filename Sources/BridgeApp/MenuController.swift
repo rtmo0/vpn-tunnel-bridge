@@ -311,13 +311,42 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     @objc private func about() {
         NSApp.activate(ignoringOtherApps: true)
-        // Name, version and license only.
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Bridge",
             .applicationVersion: Updater.currentVersion,
             .version: "",
-            .credits: NSAttributedString(string: ""),
+            .credits: Self.aboutCredits,
         ])
+    }
+
+    /// License block for the About panel, with a link to the repository.
+    private static var aboutCredits: NSAttributedString {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        center.paragraphSpacing = 4
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: center,
+        ]
+        let repo = "https://github.com/\(Updater.repository)"
+        let text = NSMutableAttributedString()
+        var protocols = body
+        protocols[.font] = NSFont.systemFont(ofSize: 11, weight: .medium)
+        protocols[.foregroundColor] = NSColor.labelColor
+        text.append(NSAttributedString(string: "AmneziaWG · WireGuard · OpenVPN\n\n", attributes: protocols))
+        text.append(NSAttributedString(string: "Free and open source under the MIT License.\n", attributes: body))
+        text.append(NSAttributedString(
+            string: "Use, copy, modify and distribute it freely; provided “as is”, without warranty.\n",
+            attributes: body))
+        var link = body
+        link[.link] = URL(string: repo)!
+        link[.foregroundColor] = NSColor.linkColor
+        text.append(NSAttributedString(string: repo.replacingOccurrences(of: "https://", with: ""), attributes: link))
+        text.append(NSAttributedString(
+            string: "\n\nIncludes amneziawg-go (MIT) and OpenVPN (GPL-2.0).",
+            attributes: body))
+        return text
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
