@@ -57,29 +57,46 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
 
     // MARK: Check
 
+    /// Finds the latest release through github.com redirects, which (unlike the
+    /// REST API) are not rate-limited: /releases/latest redirects to /releases/tag/<tag>,
+    /// and assets live at /releases/download/<tag>/<name>.
     func check(userInitiated: Bool) {
         if case .downloading = state { return }
         if case .installing = state { return }
         state = .checking
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repository)/releases/latest")!)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let repo = Self.repository
+        var request = URLRequest(url: URL(string: "https://github.com/\(repo)/releases/latest")!)
+        request.httpMethod = "HEAD"
         request.setValue("Bridge-Updater", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 20
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            let release = data.flatMap(Self.parse)
-            DispatchQueue.main.async {
-                guard let release else {
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            let http = response as? HTTPURLResponse
+            let finalURL = http?.url?.absoluteString ?? ""
+            let tag = finalURL.range(of: "/releases/tag/").map { String(finalURL[$0.upperBound...]) }
+            guard let tag, !tag.isEmpty, http?.statusCode == 200 else {
+                DispatchQueue.main.async {
                     self.state = .idle
                     if userInitiated {
                         let reason = error?.localizedDescription
-                            ?? ((response as? HTTPURLResponse)?.statusCode == 404 ? "No releases published yet." : "Unexpected response.")
+                            ?? (finalURL.hasSuffix("/releases") ? "No releases published yet."
+                                : "GitHub answered with status \(http?.statusCode ?? 0).")
                         Alerts.show("Could not check for updates", reason)
                     }
-                    return
                 }
+                return
+            }
+            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            let base = "https://github.com/\(repo)/releases/download/\(tag)"
+            let release = Release(version: version, notes: "",
+                                  zipURL: URL(string: "\(base)/Bridge.zip")!,
+                                  checksumURL: URL(string: "\(base)/Bridge.zip.sha256"),
+                                  page: URL(string: "https://github.com/\(repo)/releases/tag/\(tag)")!)
+            DispatchQueue.main.async {
                 if Self.isNewer(release.version, than: Self.currentVersion) {
-                    self.state = .available(release)
-                    if userInitiated { self.install(release) }
+                    self.fetchNotes(for: release) { withNotes in
+                        self.state = .available(withNotes)
+                        if userInitiated { self.install(withNotes) }
+                    }
                 } else {
                     self.state = .idle
                     if userInitiated {
@@ -90,22 +107,19 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         }.resume()
     }
 
-    private static func parse(_ data: Data) -> Release? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = json["tag_name"] as? String,
-              (json["draft"] as? Bool) != true, (json["prerelease"] as? Bool) != true,
-              let assets = json["assets"] as? [[String: Any]] else { return nil }
-        func asset(_ name: String) -> URL? {
-            assets.first { $0["name"] as? String == name }
-                .flatMap { $0["browser_download_url"] as? String }
-                .flatMap(URL.init(string:))
-        }
-        guard let zip = asset("Bridge.zip") else { return nil }
-        let page = (json["html_url"] as? String).flatMap(URL.init(string:))
-            ?? URL(string: "https://github.com/\(repository)/releases")!
-        return Release(version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
-                       notes: (json["body"] as? String) ?? "", zipURL: zip,
-                       checksumURL: asset("Bridge.zip.sha256"), page: page)
+    /// Release notes come from the REST API; if it is rate-limited, update without them.
+    private func fetchNotes(for release: Release, completion: @escaping (Release) -> Void) {
+        let tag = release.page.lastPathComponent
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repository)/releases/tags/\(tag)")!)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Bridge-Updater", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 8
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            let body = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["body"] as? String
+            let result = Release(version: release.version, notes: body ?? "", zipURL: release.zipURL,
+                                 checksumURL: release.checksumURL, page: release.page)
+            DispatchQueue.main.async { completion(result) }
+        }.resume()
     }
 
     static func isNewer(_ candidate: String, than current: String) -> Bool {

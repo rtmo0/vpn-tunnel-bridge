@@ -69,4 +69,4 @@ jobs:
             git tag "$TAG" && git push origin "$TAG"
           fi
           gh release create "$TAG" build/Bridge.zip build/Bridge.zip.sha256 \
-            --title "Bridge ${TAG#v}" --generate-notes --verify-tag
+            --title "Bridge ${TAG#v}" --generate-notes --verify-tag --latest
