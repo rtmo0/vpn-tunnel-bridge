@@ -254,6 +254,11 @@ public struct OpenVPNConfig: Equatable, Sendable {
             if name == "dev-type", directive.args.first?.lowercased() == "tap" {
                 throw ConfigError("TAP (layer 2) tunnels are not supported on macOS; only 'dev tun' works")
             }
+            if name == "setenv", directive.args.first == "opt", directive.args.count > 1,
+               Self.strippedDirectives.contains(directive.args[1].lowercased()) {
+                stripped.insert(directive.args[1].lowercased())
+                continue
+            }
             if Self.strippedDirectives.contains(name) || name.hasPrefix("management-") {
                 stripped.insert(name)
                 continue

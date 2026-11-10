@@ -97,3 +97,28 @@ AllowedIPs = 0.0.0.0/0, ::/0
         #expect(excluded.contains("route 192.0.2.0 255.255.255.0 net_gateway"))
     }
 }
+
+@Suite struct TunnelSettingsCodingTests {
+    @Test func oldSettingsFilesStillDecode() throws {
+        let json = #"{"dnsMode":"custom","dnsServers":["10.100.105.1"],"splitDNSDomains":["lime-shine.com"]}"#
+        let s = try JSONDecoder().decode(TunnelSettings.self, from: Data(json.utf8))
+        #expect(s.dnsMode == .custom)
+        #expect(s.splitDNSDomains == ["lime-shine.com"])
+        #expect(s.killSwitch == false)
+        #expect(s.routing == .config)
+    }
+
+    @Test func roundTrip() throws {
+        var s = TunnelSettings()
+        s.killSwitch = true
+        s.routing = .allTraffic
+        let back = try JSONDecoder().decode(TunnelSettings.self, from: try JSONEncoder().encode(s))
+        #expect(back == s)
+    }
+
+    @Test func stripsWindowsSetenvOpt() throws {
+        let c = try OpenVPNConfig.parse("client\nremote a 1194\nsetenv opt block-outside-dns\n")
+        let text = try c.prepared(tunnel: "t", managementSocket: "/m", eventCommand: "/e").text
+        #expect(!text.contains("block-outside-dns"))
+    }
+}

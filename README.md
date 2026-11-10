@@ -79,10 +79,18 @@ bridge-helper (root, launchd)
   must be self-contained (no file references, no `config` includes) when they reach the helper.
 - Private keys and passwords never appear in logs; OpenVPN passwords live in the Keychain.
 
+## Network protection
+
+- **Network changes**: when Wi-Fi/Ethernet changes, routes to VPN servers and
+  excluded networks follow the new uplink; OpenVPN tunnels reconnect.
+- **Kill switch** (per tunnel): while connected, only the VPN, its server, DHCP and
+  the local network are reachable (pf anchor `com.apple/bridge`). If the tunnel
+  drops, traffic stays blocked until you reconnect or choose "Unblock Internet".
+- **IPv6 leak protection**: full tunnels without IPv6 block outgoing IPv6.
+
 ## Not yet
 
-Reconnect on network change, kill switch, IPv6 leak protection for IPv4-only tunnels,
-corporate protocols (OpenConnect), Developer ID signing.
+Corporate protocols (OpenConnect), Developer ID signing.
 
 ## License
 

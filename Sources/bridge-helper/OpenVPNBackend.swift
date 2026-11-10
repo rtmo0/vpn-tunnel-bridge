@@ -44,6 +44,28 @@ final class OpenVPNBackend: TunnelBackend {
 
     var dnsWarning: String? { locked { _dnsWarning } }
 
+    /// Routes Bridge added on OpenVPN's behalf; removed when the tunnel stops.
+    private var _extraRoutes: [RouteEntry] = []
+
+    /// OpenVPN cannot redirect the default gateway when the current default route
+    /// has no gateway address (e.g. another VPN owns it). Do what it would have done:
+    /// pin the server to the current path, then send all IPv4 traffic into the tunnel.
+    func redirectAllTraffic(dev: String, server: String?) {
+        var added: [RouteEntry] = []
+        if let server, let ip = IPAddress(server), let path = Routes.lookup(server, ipv6: ip.isIPv6),
+           path.interface != dev {
+            let pin = RouteEntry(destination: server, ipv6: ip.isIPv6, gateway: path.gateway,
+                                 interface: path.gateway == nil ? path.interface : nil)
+            if (try? Routes.add(pin)) == true { added.append(pin) }
+        }
+        for half in ["0.0.0.0/1", "128.0.0.0/1"] {
+            let entry = RouteEntry(destination: half, ipv6: false, gateway: nil, interface: dev)
+            if (try? Routes.add(entry)) == true { added.append(entry) }
+        }
+        locked { _extraRoutes += added }
+        log("  OpenVPN could not redirect the default gateway; Bridge routed all IPv4 traffic through \(dev)")
+    }
+
     func setDNS(_ dns: PendingDNS?) -> Bool {
         locked {
             _pendingDNS = dns
@@ -360,6 +382,12 @@ final class OpenVPNBackend: TunnelBackend {
         return lines.isEmpty ? "" : "Last log lines:\n\(lines)"
     }
 
+    /// Soft restart after a network change (OpenVPN re-resolves and reconnects).
+    func reconnect() {
+        log("  '\(tunnel)' reconnecting after a network change")
+        send("signal SIGUSR1")
+    }
+
     func stop() {
         if process.isRunning {
             send("signal SIGTERM")
@@ -373,6 +401,12 @@ final class OpenVPNBackend: TunnelBackend {
             return fd
         }
         if fd >= 0 { close(fd) }
+        let extra = locked { () -> [RouteEntry] in
+            let routes = _extraRoutes
+            _extraRoutes = []
+            return routes
+        }
+        for route in extra.reversed() { Routes.delete(route) }
         OpenVPNRegistry.shared.unregister(tunnel)
         unlink(configPath)
         unlink(managementPath)
@@ -391,6 +425,8 @@ struct CodedError: Error, CustomStringConvertible {
 /// manager queue, which is busy while `up` waits for CONNECTED.
 final class OpenVPNRegistry {
     static let shared = OpenVPNRegistry()
+    /// Called after route-up / down so the firewall can follow the tunnel.
+    var onRoutesChanged: () -> Void = {}
     private let lock = NSLock()
     private var backends: [String: OpenVPNBackend] = [:]
 
@@ -436,6 +472,10 @@ final class OpenVPNRegistry {
         switch event {
         case "up":
             let dev = env["dev"] ?? ""
+            let wantsAll = ["1", "2"].contains(env["route_redirect_gateway_ipv4"] ?? "")
+            if wantsAll && env["redirect_gateway"] != "1" {
+                backend.redirectAllTraffic(dev: dev, server: env["trusted_ip"])
+            }
             // After route-up, a full tunnel sends public destinations to the tunnel device.
             let full = Routes.lookup("1.1.1.1", ipv6: false)?.interface == dev
             var ipv6: [(String, Int)] = []
@@ -444,6 +484,7 @@ final class OpenVPNRegistry {
             let haveDNS = backend.setRoutes(interface: dev, full: full, split: env["BRIDGE_DNS_SPLIT"] == "1",
                                             ipv4: env["ifconfig_local"].map { [$0] } ?? [], ipv6: ipv6)
             if haveDNS { backend.applyDNS() }
+            onRoutesChanged()
 
         case "dns-up":
             var servers: [String] = []

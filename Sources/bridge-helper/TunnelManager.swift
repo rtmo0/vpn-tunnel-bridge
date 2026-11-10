@@ -27,6 +27,9 @@ final class ActiveTunnel {
     var backendPath: String
     var routes: [RouteEntry] = []
     var warnings: [String]
+    var settings = TunnelSettings()
+    /// VPN server addresses (kept reachable by the kill switch).
+    var serverIPs: [String] = []
 
     init(name: String, kind: TunnelKind, wireGuard: TunnelConfig?, openVPN: OpenVPNConfig?, backendPath: String) {
         self.name = name
@@ -50,6 +53,12 @@ final class TunnelManager {
     private var tunnels: [String: ActiveTunnel] = [:]
     private let dns = DNSManager.shared
     private let statePath = "\(AmneziaBackend.runDirectory)/state.json"
+    let firewall = Firewall()
+    /// Tunnels that dropped while their kill switch was on: traffic stays blocked
+    /// (except to these servers) until the user disconnects or lifts it.
+    private var killSwitchHolds: [String: [String]] = [:]
+    /// Interface/gateway used for routes outside the tunnels, to detect network changes.
+    private var lastUplink: Routes.Lookup?
 
     var capabilities: [TunnelKind] {
         OpenVPNBackend.isAvailable ? [.amneziawg, .wireguard, .openvpn] : [.amneziawg, .wireguard]
@@ -64,21 +73,36 @@ final class TunnelManager {
             case .ping:
                 return HelperResponse(ok: true, capabilities: capabilities)
             case .status:
-                return HelperResponse(ok: true, tunnels: statuses(filter: request.name))
+                var response = HelperResponse(ok: true, tunnels: statuses(filter: request.name))
+                response.killSwitchHolds = killSwitchHolds.keys.sorted()
+                return response
+            case .releaseKillSwitch:
+                if !killSwitchHolds.isEmpty { log("kill switch lifted by the user") }
+                killSwitchHolds.removeAll()
+                updateFirewall()
+                return HelperResponse(ok: true)
             case .up:
                 guard let name = request.name, TunnelName.isValid(name) else {
                     return .failure("Invalid tunnel name", code: .invalidConfig)
                 }
                 guard let text = request.config else { return .failure("No configuration supplied", code: .invalidConfig) }
+                let settings = request.settings ?? TunnelSettings()
                 let status = try up(name: name, configText: text, secrets: request.secrets ?? TunnelSecrets(),
-                                    settings: request.settings ?? TunnelSettings())
+                                    settings: settings)
+                tunnels[name]?.settings = settings
+                killSwitchHolds[name] = nil
+                updateFirewall()
                 return HelperResponse(ok: true, tunnels: [status])
             case .down:
                 guard let name = request.name else { return .failure("No tunnel name") }
-                try down(name: name)
+                killSwitchHolds[name] = nil
+                if tunnels[name] != nil { try down(name: name) }
+                updateFirewall()
                 return HelperResponse(ok: true)
             case .downAll:
+                killSwitchHolds.removeAll()
                 downAll()
+                updateFirewall()
                 return HelperResponse(ok: true)
             case .openvpnEvent:
                 return .failure("openvpnEvent is handled outside the manager queue")
@@ -132,6 +156,8 @@ final class TunnelManager {
             for peer in config.peers {
                 if let endpoint = peer.endpoint { resolved[peer.publicKey] = try Resolver.resolve(endpoint) }
             }
+
+            tunnel.serverIPs = resolved.values.map { "\($0.address)" }
 
             // Pin the route to each server *before* the tunnel routes capture it.
             let allAllowed = config.peers.flatMap(\.allowedIPs)
@@ -189,6 +215,7 @@ final class TunnelManager {
                 tunnel.warnings.append(warning)
             }
             log("up '\(name)' done on \(backend.interface)")
+            lastUplink = Routes.uplink(excluding: [backend.interface])
             return status(of: tunnel)
         } catch {
             log("up '\(name)' failed: \(error)")
@@ -266,9 +293,100 @@ final class TunnelManager {
     private func backendExited(name: String, pid: Int32) {
         guard let tunnel = tunnels[name], let backend = tunnel.backend, backend.pid == pid else { return }
         log("backend of '\(name)' (pid \(pid)) exited, cleaning up")
+        let servers = servers(of: tunnel)
         teardown(tunnel)
         tunnels[name] = nil
+        if tunnel.settings.killSwitch {
+            killSwitchHolds[name] = servers
+            log("  kill switch of '\(name)' keeps blocking traffic until it is reconnected or lifted")
+        }
         saveState()
+        updateFirewall()
+    }
+
+    // MARK: Firewall
+
+    private func servers(of tunnel: ActiveTunnel) -> [String] {
+        var servers = tunnel.serverIPs
+        if let backend = tunnel.backend as? OpenVPNBackend, let remote = backend.snapshot.remote,
+           let host = remote.split(separator: ":").first, IPAddress(String(host)) != nil {
+            servers.append(String(host))
+        }
+        return servers
+    }
+
+    /// Recomputes kill switch and IPv6 leak protection from the current tunnels.
+    func updateFirewall() {
+        var rules = Firewall.Rules()
+        for tunnel in tunnels.values.sorted(by: { $0.name < $1.name }) {
+            if let interface = tunnel.backend?.interface, !interface.isEmpty {
+                rules.tunnelInterfaces.append(interface)
+            }
+            rules.servers += servers(of: tunnel)
+            if tunnel.settings.killSwitch { rules.killSwitch = true }
+            // A full tunnel without IPv6 would let IPv6 traffic go around it.
+            if tunnel.routesAllTraffic {
+                let hasIPv6: Bool
+                if let config = tunnel.wireGuard {
+                    hasIPv6 = config.addresses.contains(where: \.isIPv6)
+                } else if let backend = tunnel.backend as? OpenVPNBackend {
+                    hasIPv6 = backend.snapshot.localIPv6 != nil
+                } else {
+                    hasIPv6 = false
+                }
+                if !hasIPv6 { rules.blockIPv6 = true }
+            }
+        }
+        for servers in killSwitchHolds.values {
+            rules.killSwitch = true
+            rules.servers += servers
+        }
+        rules.servers = Array(Set(rules.servers)).sorted()
+        firewall.apply(rules)
+    }
+
+    // MARK: Network changes
+
+    /// Called when the primary network changes. Routes that point outside the
+    /// tunnels (pinned servers, excluded networks) follow the new uplink, and
+    /// OpenVPN tunnels reconnect.
+    func networkChanged() {
+        let ours = Set(tunnels.values.compactMap { $0.backend?.interface }.filter { !$0.isEmpty })
+        guard let uplink = Routes.uplink(excluding: ours) else {
+            log("network change: no uplink (offline?)")
+            return
+        }
+        if let last = lastUplink, last.gateway == uplink.gateway, last.interface == uplink.interface { return }
+        log("network change: uplink is now \(uplink.gateway ?? "-") on \(uplink.interface ?? "?")")
+        lastUplink = uplink
+
+        for tunnel in tunnels.values {
+            guard let backend = tunnel.backend else { continue }
+            if let vpn = backend as? OpenVPNBackend {
+                vpn.reconnect()
+                continue
+            }
+            var moved: [RouteEntry] = []
+            for route in tunnel.routes {
+                guard route.interface != backend.interface else {
+                    moved.append(route)
+                    continue
+                }
+                let next = RouteEntry(destination: route.destination, ipv6: route.ipv6,
+                                      gateway: route.ipv6 ? route.gateway : uplink.gateway,
+                                      interface: uplink.gateway == nil ? uplink.interface : nil)
+                guard !route.ipv6, next != route else {
+                    moved.append(route)
+                    continue
+                }
+                Routes.delete(route)
+                if (try? Routes.add(next)) == true { moved.append(next) } else { moved.append(route) }
+            }
+            tunnel.routes = moved
+            log("  '\(tunnel.name)' now reaches its server via \(uplink.interface ?? "?")")
+        }
+        saveState()
+        updateFirewall()
     }
 
     // MARK: Status

@@ -50,6 +50,16 @@ public enum HelperClient {
         try call(HelperRequest(command: .status), timeout: 10).tunnels ?? []
     }
 
+    /// Statuses plus tunnels whose kill switch still blocks traffic.
+    public static func fullStatus() throws -> (tunnels: [TunnelStatus], killSwitchHolds: [String]) {
+        let response = try call(HelperRequest(command: .status), timeout: 10)
+        return (response.tunnels ?? [], response.killSwitchHolds ?? [])
+    }
+
+    public static func releaseKillSwitch() throws {
+        try call(HelperRequest(command: .releaseKillSwitch), timeout: 10)
+    }
+
     public static func disconnect(_ name: String) throws {
         try call(HelperRequest(command: .down, name: name), timeout: 30)
     }

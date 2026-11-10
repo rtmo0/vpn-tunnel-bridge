@@ -382,6 +382,7 @@ struct TunnelDetail: View {
                     .font(.body.monospaced())
             }
             Toggle("Keep local networks off the VPN", isOn: $settings.excludeLocalNetworks)
+            Toggle("Kill switch", isOn: $settings.killSwitch)
         } header: {
             Text("Routing")
         } footer: {
@@ -391,12 +392,18 @@ struct TunnelDetail: View {
     }
 
     private var routingFooter: String {
+        let base: String
         switch settings.routing {
-        case .config: summary?.kind == .openvpn ? "Uses the routes the OpenVPN server pushes." : "Uses AllowedIPs from the configuration."
-        case .allTraffic: "Everything goes through the tunnel."
-        case .onlyListed: "Split tunnelling: only these networks use the VPN, everything else goes direct."
-        case .allExceptListed: "These networks go direct, everything else uses the VPN."
+        case .config:
+            base = summary?.kind == .openvpn ? "Uses the routes the OpenVPN server pushes."
+                : "Uses AllowedIPs from the configuration."
+        case .allTraffic: base = "Everything goes through the tunnel."
+        case .onlyListed: base = "Split tunnelling: only these networks use the VPN, everything else goes direct."
+        case .allExceptListed: base = "These networks go direct, everything else uses the VPN."
         }
+        guard settings.killSwitch else { return base }
+        return base + " Kill switch: while connected, only the VPN, its server and your local network are reachable; "
+            + "if the tunnel drops, traffic stays blocked until you reconnect or unblock it from the menu."
     }
 
     private var dnsSection: some View {

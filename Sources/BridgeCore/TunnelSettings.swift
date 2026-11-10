@@ -34,7 +34,27 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
     /// When not empty, the tunnel's DNS answers only these domains (split DNS).
     public var splitDNSDomains: [String] = []
 
+    /// Block all traffic outside the tunnel while it is on, and keep blocking if it
+    /// drops unexpectedly, until the user disconnects it. LAN and DHCP stay allowed.
+    public var killSwitch = false
+
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case routing, networks, excludeLocalNetworks, dnsMode, dnsServers, splitDNSDomains, killSwitch
+    }
+
+    /// Missing keys fall back to defaults, so settings saved by older versions keep working.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        routing = try c.decodeIfPresent(Routing.self, forKey: .routing) ?? .config
+        networks = try c.decodeIfPresent([String].self, forKey: .networks) ?? []
+        excludeLocalNetworks = try c.decodeIfPresent(Bool.self, forKey: .excludeLocalNetworks) ?? false
+        dnsMode = try c.decodeIfPresent(DNSMode.self, forKey: .dnsMode) ?? .config
+        dnsServers = try c.decodeIfPresent([String].self, forKey: .dnsServers) ?? []
+        splitDNSDomains = try c.decodeIfPresent([String].self, forKey: .splitDNSDomains) ?? []
+        killSwitch = try c.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? false
+    }
 
     public var isDefault: Bool { self == TunnelSettings() }
 

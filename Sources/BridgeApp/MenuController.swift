@@ -22,6 +22,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     /// Everything that changes which items exist (as opposed to their text).
     private var structure: String {
         let rows = model.rows.map { "\($0.name)|\($0.kind)|\($0.saved)|\($0.status?.connected ?? false)|\($0.status != nil)" }
+        let holds = model.killSwitchHolds.joined(separator: ",")
         let update: String
         switch updater.state {
         case .idle, .checking: update = "none"
@@ -29,7 +30,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         case .downloading: update = "downloading"
         case .installing: update = "installing"
         }
-        return "\(rows)|\(model.busy.sorted())|\(model.helper)|\(model.installing)|\(update)"
+        return "\(rows)|\(model.busy.sorted())|\(model.helper)|\(model.installing)|\(update)|\(holds)"
     }
 
     init(model: AppModel) {
@@ -108,6 +109,12 @@ final class MenuController: NSObject, NSMenuDelegate {
         statusLineItem = status
         menu.addItem(status)
 
+        if !model.killSwitchHolds.isEmpty {
+            let item = action("Unblock Internet (Kill Switch)", #selector(releaseKillSwitch))
+            item.image = NSImage(systemSymbolName: "exclamationmark.shield.fill", accessibilityDescription: nil)
+            menu.addItem(item)
+        }
+
         updateItem = nil
         switch updater.state {
         case .idle, .checking:
@@ -167,6 +174,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     private var statusLine: String {
         let connected = model.connectedRows
         if !model.busy.isEmpty { return "Status: Connecting…" }
+        if !model.killSwitchHolds.isEmpty && connected.isEmpty {
+            return "Status: Kill switch is blocking traffic (\(model.killSwitchHolds.joined(separator: ", ")) dropped)"
+        }
         if connected.count == 1 { return "Status: Connected — \(connected[0].name)" }
         if connected.count > 1 { return "Status: \(connected.count) tunnels connected" }
         if model.rows.contains(where: { $0.status != nil }) { return "Status: Waiting for server…" }
@@ -296,6 +306,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func installHelper() { model.installHelper() }
     @objc private func manageTunnels() { ManageWindow.show(model: model) }
     @objc private func checkUpdates() { updater.check(userInitiated: true) }
+    @objc private func releaseKillSwitch() { model.releaseKillSwitch() }
     @objc private func installUpdate() {
         if case let .available(release) = updater.state { updater.install(release) }
     }

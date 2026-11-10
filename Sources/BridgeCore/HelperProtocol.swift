@@ -9,7 +9,7 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 3
+    public static let version = 4
 }
 
 /// Secrets supplied by the client for a single connection attempt.
@@ -32,6 +32,8 @@ public struct TunnelSecrets: Codable, Sendable, Equatable {
 public struct HelperRequest: Codable, Sendable {
     public enum Command: String, Codable, Sendable {
         case up, down, downAll, status, ping
+        /// Lift a kill switch that keeps blocking after its tunnel dropped.
+        case releaseKillSwitch
         /// Sent by OpenVPN's route-up/down hook (runs as root) back to the helper.
         case openvpnEvent
     }
@@ -130,6 +132,8 @@ public struct HelperResponse: Codable, Sendable {
     public var helperVersion: Int?
     /// Version of the app that installed the helper (from its `version` file).
     public var helperBuild: String?
+    /// Tunnels whose kill switch is still blocking traffic after they dropped.
+    public var killSwitchHolds: [String]?
     public var capabilities: [TunnelKind]?
 
     public init(ok: Bool, error: String? = nil, errorCode: HelperErrorCode? = nil, errorDetail: String? = nil,

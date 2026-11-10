@@ -30,7 +30,8 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event"
     let env = ProcessInfo.processInfo.environment
     let wanted = env.filter { key, _ in
         key == "dev" || key.hasPrefix("foreign_option_") || key.hasPrefix("dns_") || key.hasPrefix("ifconfig_")
-            || key.hasPrefix("BRIDGE_")
+            || key.hasPrefix("BRIDGE_") || key == "trusted_ip" || key == "redirect_gateway"
+            || key.hasPrefix("route_redirect_gateway")
     }
     let request = HelperRequest(command: .openvpnEvent, name: env["BRIDGE_TUNNEL"],
                                 event: CommandLine.arguments[2], environment: wanted)
@@ -63,6 +64,10 @@ do {
 log(OpenVPNBackend.isAvailable ? "OpenVPN backend: \(OpenVPNBackend.executablePath)" : "OpenVPN backend not installed")
 
 let manager = TunnelManager()
+manager.queue.sync { manager.firewall.recover() }
+let networkMonitor = NetworkMonitor { manager.queue.async { manager.networkChanged() } }
+// OpenVPN tunnels learn their interface and routes asynchronously (route-up hook).
+OpenVPNRegistry.shared.onRoutesChanged = { manager.queue.async { manager.updateFirewall() } }
 let installedBuild = (try? String(contentsOfFile: URL(fileURLWithPath: AmneziaBackend.helperExecutablePath)
     .deletingLastPathComponent().appendingPathComponent("version").path, encoding: .utf8))?
     .trimmingCharacters(in: .whitespacesAndNewlines)

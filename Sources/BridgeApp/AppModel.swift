@@ -24,6 +24,8 @@ final class AppModel: ObservableObject {
     private(set) var busy: Set<String> = []
     private(set) var installing = false
     private(set) var rates: [String: (rx: Double, tx: Double)] = [:]
+    /// Tunnels that dropped with the kill switch on: the Mac has no internet until lifted.
+    private(set) var killSwitchHolds: [String] = []
 
     /// Called on the main thread whenever something visible changed.
     var onChange: () -> Void = {}
@@ -56,6 +58,7 @@ final class AppModel: ObservableObject {
         let connected = connectedRows.count
         if connected > 0 { return .connected(count: connected) }
         if case .outdated = helper { return .error }
+        if !killSwitchHolds.isEmpty { return .error }
         return .disconnected
     }
 
@@ -71,7 +74,11 @@ final class AppModel: ObservableObject {
             let saved = TunnelLibrary.list()
             let availability = HelperClient.availability(expectedBuild: Updater.currentBuild)
             var statuses: [TunnelStatus]?
-            if case .ready = availability, !skipStatus { statuses = try? HelperClient.statuses() }
+            var holds: [String]?
+            if case .ready = availability, !skipStatus, let full = try? HelperClient.fullStatus() {
+                statuses = full.tunnels
+                holds = full.killSwitchHolds
+            }
             DispatchQueue.main.async {
                 self.refreshing = false
                 let active = statuses ?? previous.compactMap(\.status)
@@ -86,6 +93,8 @@ final class AppModel: ObservableObject {
                 }
                 if statuses != nil { self.updateRates(rows) }
                 let changed = rows != self.rows || availability != self.helper
+                    || (holds != nil && holds != self.killSwitchHolds)
+                if let holds { self.killSwitchHolds = holds }
                 self.rows = rows
                 self.helper = availability
                 if changed || statuses != nil { self.changed() }
@@ -177,6 +186,17 @@ final class AppModel: ObservableObject {
     }
 
     func isActive(_ name: String) -> Bool { rows.first { $0.name == name }?.status != nil }
+
+    func releaseKillSwitch() {
+        work.async {
+            var failure: String?
+            do { try HelperClient.releaseKillSwitch() } catch { failure = error.localizedDescription }
+            DispatchQueue.main.async {
+                if let failure { Alerts.show("Could not lift the kill switch", failure) }
+                self.refresh()
+            }
+        }
+    }
 
     func disconnectAll() {
         work.async {

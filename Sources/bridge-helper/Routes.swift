@@ -55,6 +55,20 @@ enum Routes {
         return lookup
     }
 
+    /// The default route outside Bridge's own tunnels (Wi-Fi, Ethernet, or another VPN).
+    static func uplink(excluding interfaces: Set<String>) -> Lookup? {
+        let result = run("/usr/sbin/netstat", ["-rn", "-f", "inet"])
+        guard result.succeeded else { return nil }
+        for line in result.output.split(separator: "\n") {
+            let cols = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard cols.count >= 4, cols[0] == "default", let interface = cols.last,
+                  !interfaces.contains(interface) else { continue }
+            let gateway = IPAddress(cols[1]) != nil ? cols[1] : nil
+            return Lookup(gateway: gateway, interface: interface)
+        }
+        return nil
+    }
+
     /// Adds a route. Returns false if an identical route already existed (so we don't own it).
     @discardableResult
     static func add(_ entry: RouteEntry) throws -> Bool {
