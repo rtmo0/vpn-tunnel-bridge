@@ -19,17 +19,44 @@ final class AppModel: ObservableObject {
         }
     }
 
-    @Published private(set) var rows: [Row] = []
+    @Published private(set) var rows: [Row] = [] { didSet { updateAnimation() } }
     @Published private(set) var helper: HelperClient.Availability = .notInstalled
-    @Published private(set) var busy: Set<String> = []
+    @Published private(set) var busy: Set<String> = [] { didSet { updateAnimation() } }
     @Published var message: String?
     @Published private(set) var installing = false
 
+    /// Drives the "building the bridge" animation in the menu bar.
+    @Published private(set) var animationFrame = 0
+
     private var timer: Timer?
+    private var animationTimer: Timer?
     private var refreshing = false
 
     var anyConnected: Bool { rows.contains { $0.status?.connected == true } }
     var anyActive: Bool { rows.contains { $0.status != nil } }
+
+    var menuIconState: MenuBarIcon.State {
+        if !busy.isEmpty || rows.contains(where: { $0.status != nil && $0.status?.connected == false }) {
+            return .connecting
+        }
+        let connected = rows.filter { $0.status?.connected == true }.count
+        if connected > 0 { return .connected(count: connected) }
+        if message != nil { return .error }
+        return .disconnected
+    }
+
+    private func updateAnimation() {
+        let animate = menuIconState == .connecting
+        if animate && animationTimer == nil {
+            animationTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.animationFrame += 1 }
+            }
+        } else if !animate, let timer = animationTimer {
+            timer.invalidate()
+            animationTimer = nil
+            animationFrame = 0
+        }
+    }
 
     var helperReady: Bool {
         if case .ready = helper { return true }

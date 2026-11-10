@@ -12,7 +12,7 @@ struct BridgeApp: App {
             MenuContent()
                 .environmentObject(model)
         } label: {
-            Image(systemName: model.anyConnected ? "lock.shield.fill" : (model.anyActive ? "lock.shield" : "shield"))
+            Image(nsImage: MenuBarIcon.image(model.menuIconState, frame: model.animationFrame))
         }
         .menuBarExtraStyle(.window)
     }
@@ -49,9 +49,16 @@ struct MenuContent: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("Bridge").font(.headline)
-            Text("Tunnel Bridge").font(.subheadline).foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Bridge").font(.headline)
+                Text(model.anyConnected ? "Protected" : "Tunnel Bridge")
+                    .font(.caption)
+                    .foregroundStyle(model.anyConnected ? Color.green : Color.secondary)
+            }
             Spacer()
             if model.anyActive {
                 Button("Disconnect All") { model.disconnectAll() }
@@ -110,7 +117,7 @@ struct MenuContent: View {
                 VStack(spacing: 0) {
                     ForEach(model.rows) { row in
                         TunnelRowView(row: row)
-                        if row.id != model.rows.last?.id { Divider().padding(.leading, 32) }
+                        if row.id != model.rows.last?.id { Divider().padding(.leading, 50) }
                     }
                 }
             }
@@ -160,12 +167,13 @@ struct TunnelRowView: View {
     private var busy: Bool { model.busy.contains(row.name) }
 
     private var dotColor: Color {
-        guard let status = row.status else { return .secondary.opacity(0.4) }
+        if busy { return .orange }
+        guard let status = row.status else { return Color(nsColor: .tertiaryLabelColor) }
         return status.connected ? .green : .orange
     }
 
     private var subtitle: String {
-        var parts = [row.kind.displayName]
+        var parts: [String] = []
         if busy {
             parts.append(row.status == nil ? "Connecting…" : "Disconnecting…")
         } else if let status = row.status {
@@ -185,7 +193,11 @@ struct TunnelRowView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle().fill(dotColor).frame(width: 9, height: 9)
+            ProtocolBadge(kind: row.kind)
+                .overlay(alignment: .bottomTrailing) {
+                    StatusDot(color: dotColor).offset(x: 3, y: 3)
+                }
+                .opacity(row.status == nil && !busy ? 0.75 : 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.name).font(.body.weight(.medium)).lineLimit(1)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)

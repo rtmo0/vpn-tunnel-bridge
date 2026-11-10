@@ -45,6 +45,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$PRODUCTS/BridgeApp" "$APP/Contents/MacOS/Bridge"
 cp "$BIN"/* "$APP/Contents/Resources/"
 install -m 755 "$ROOT/scripts/install-helper.sh" "$APP/Contents/Resources/install-helper.sh"
+cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -60,6 +61,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$(date +%Y%m%d%H%M)</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHumanReadableCopyright</key><string>Tunnel Bridge. MIT License.</string>
 </dict>
 </plist>
@@ -73,7 +75,7 @@ codesign --verify "$APP"
 
 echo "==> Done"
 for f in "$APP/Contents/MacOS/Bridge" "$APP/Contents/Resources"/*; do
-  [ "${f##*.}" = "sh" ] && continue
+  case "${f##*.}" in sh|icns) continue;; esac
   echo "    $(basename "$f"): $(lipo -archs "$f")"
 done
 echo "Run it: open \"$APP\""
