@@ -20,6 +20,11 @@ enum ManageWindow {
             let window = NSWindow(contentViewController: NSHostingController(rootView: root))
             window.title = "Tunnels"
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            // Like Mail or System Settings: the sidebar runs up under the traffic lights,
+            // no title bar strip or separator line over the content.
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.toolbarStyle = .unified
             window.setContentSize(NSSize(width: 820, height: 580))
             window.minSize = NSSize(width: 680, height: 440)
@@ -44,51 +49,79 @@ struct ManageView: View {
     private var saved: [AppModel.Row] { model.rows.filter(\.saved) }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selection.name) {
-                ForEach(saved, id: \.name) { row in
-                    TunnelListRow(row: row, busy: model.busy.contains(row.name)).tag(row.name)
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 0) {
-                    Divider()
-                    HStack(spacing: 2) {
-                        Button { model.importConfigs() } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
-                            .help("Import tunnels from .conf / .ovpn files")
-                        Button {
-                            if let name = selection.name { model.remove(name) }
-                        } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
-                            .disabled(selection.name == nil)
-                            .help("Remove the selected tunnel")
-                        Spacer()
-                        Button { model.openLogs() } label: { Image(systemName: "doc.text.magnifyingglass").frame(width: 22, height: 20) }
-                            .help("Open logs")
-                    }
-                    .buttonStyle(.borderless)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                }
-            }
-        } detail: {
-            if let name = selection.name, saved.contains(where: { $0.name == name }) {
-                TunnelDetail(name: name).id(name)
-            } else {
-                ContentUnavailableView {
-                    Label("No Tunnel Selected", systemImage: "shield")
-                } description: {
-                    Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +")
-                } actions: {
-                    Button("Import Tunnels…") { model.importConfigs() }
-                }
-            }
+        // A plain HStack instead of NavigationSplitView: hosted in our own window the
+        // split view draws a heavy black divider; this gives the native thin one.
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: 220)
+            Divider()
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .ignoresSafeArea(.container, edges: .top)
         .onChange(of: saved.map(\.name)) { _, names in
             if let current = selection.name, !names.contains(current) { selection.name = names.first }
             if selection.name == nil { selection.name = names.first }
         }
     }
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            List(selection: $selection.name) {
+                ForEach(saved, id: \.name) { row in
+                    TunnelListRow(row: row, busy: model.busy.contains(row.name)).tag(row.name)
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .padding(.top, 34)  // room for the window buttons
+            Divider()
+            HStack(spacing: 2) {
+                Button { model.importConfigs() } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
+                    .help("Import tunnels from .conf / .ovpn files")
+                Button {
+                    if let name = selection.name { model.remove(name) }
+                } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
+                    .disabled(selection.name == nil)
+                    .help("Remove the selected tunnel")
+                Spacer()
+                Button { model.openLogs() } label: { Image(systemName: "doc.text.magnifyingglass").frame(width: 22, height: 20) }
+                    .help("Open logs")
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+        .background(SidebarMaterial())
+    }
+
+    @ViewBuilder private var detail: some View {
+        if let name = selection.name, saved.contains(where: { $0.name == name }) {
+            TunnelDetail(name: name).id(name)
+                .padding(.top, 22)
+        } else {
+            ContentUnavailableView {
+                Label("No Tunnel Selected", systemImage: "shield")
+            } description: {
+                Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +")
+            } actions: {
+                Button("Import Tunnels…") { model.importConfigs() }
+            }
+        }
+    }
+}
+
+/// The translucent sidebar background used by Finder, Mail and System Settings.
+struct SidebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
 struct TunnelListRow: View {
@@ -323,7 +356,7 @@ struct TunnelDetail: View {
                         }
                     }
                 }
-                if s.kind == .openvpn { LabeledContent("Sign-in", value: s.login) }
+                if s.kind == .openvpn { LabeledContent("Authentication", value: s.login) }
             }
         } header: {
             HStack {
