@@ -155,7 +155,10 @@ extension OpenVPNConfig {
             }
         }
         if !settings.splitDNSDomains.isEmpty {
-            for domain in settings.splitDNSDomains { add("dhcp-option", "DOMAIN", domain) }
+            // DOMAIN holds a single value; further domains go in DOMAIN-SEARCH.
+            for (i, domain) in settings.splitDNSDomains.enumerated() {
+                add("dhcp-option", i == 0 ? "DOMAIN" : "DOMAIN-SEARCH", domain)
+            }
             add("setenv", "BRIDGE_DNS_SPLIT", "1")
         }
         return out

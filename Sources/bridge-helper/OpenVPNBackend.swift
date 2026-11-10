@@ -11,6 +11,8 @@ final class OpenVPNBackend: TunnelBackend {
     private let managementPath: String
     private let configPath: String
     private let secrets: TunnelSecrets
+    /// DNS overrides from Bridge settings; applied directly, not via OpenVPN's options.
+    private let settings: TunnelSettings
     private let lock = NSLock()
     private var managementFD: Int32 = -1
 
@@ -57,16 +59,24 @@ final class OpenVPNBackend: TunnelBackend {
             _ipv4 = ipv4
             _ipv6 = ipv6
             _routesReady = true
-            return _pendingDNS != nil
+            return _pendingDNS != nil || settings.dnsMode == .custom
         }
     }
 
     /// Publishes DNS once both servers and routes are known.
     func applyDNS() {
-        let (dns, interface, full, split, ipv4, ipv6) = locked {
+        let (pushed, interface, full, split, ipv4, ipv6) = locked {
             (_pendingDNS, _interface, _fullTunnel, _dnsSplitSetting, _ipv4, _ipv6)
         }
-        guard let dns, !dns.servers.isEmpty else { return }
+        guard settings.dnsMode != .system else { return }
+        // Bridge settings win over what OpenVPN reports.
+        var dns = pushed ?? PendingDNS(servers: [], domains: [], splitDomainsOnly: false)
+        if settings.dnsMode == .custom { dns.servers = settings.dnsServers }
+        if !settings.splitDNSDomains.isEmpty {
+            dns.domains = settings.splitDNSDomains
+            dns.splitDomainsOnly = true
+        }
+        guard !dns.servers.isEmpty else { return }
         // Split DNS (per Bridge settings or OpenVPN resolve-domains): only those domains.
         let primary = full && !split && !dns.splitDomainsOnly
         let settings = DNSSettings(servers: dns.servers, searchDomains: dns.domains, fullTunnel: primary,
@@ -118,7 +128,9 @@ final class OpenVPNBackend: TunnelBackend {
 
     static var isAvailable: Bool { (try? AmneziaBackend.verifyExecutable(executablePath)) != nil }
 
-    private init(process: Process, tunnel: String, managementPath: String, configPath: String, secrets: TunnelSecrets) {
+    private init(process: Process, tunnel: String, managementPath: String, configPath: String, secrets: TunnelSecrets,
+                 settings: TunnelSettings) {
+        self.settings = settings
         self.process = process
         self.tunnel = tunnel
         self.managementPath = managementPath
@@ -127,7 +139,7 @@ final class OpenVPNBackend: TunnelBackend {
     }
 
     /// Starts OpenVPN and waits until it reports CONNECTED (or fails).
-    static func start(tunnel: String, config: OpenVPNConfig, secrets: TunnelSecrets,
+    static func start(tunnel: String, config: OpenVPNConfig, secrets: TunnelSecrets, settings: TunnelSettings,
                       onExit: @escaping (Int32) -> Void) throws -> (OpenVPNBackend, [String]) {
         let path = executablePath
         try AmneziaBackend.verifyExecutable(path)
@@ -162,7 +174,7 @@ final class OpenVPNBackend: TunnelBackend {
         process.terminationHandler = { onExit($0.processIdentifier) }
 
         let backend = OpenVPNBackend(process: process, tunnel: tunnel, managementPath: managementPath,
-                                     configPath: configPath, secrets: secrets)
+                                     configPath: configPath, secrets: secrets, settings: settings)
         OpenVPNRegistry.shared.register(backend)
         do {
             try process.run()

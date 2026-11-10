@@ -109,7 +109,7 @@ final class TunnelManager {
                 throw CodedError(code: .unsupported, message: "OpenVPN is not installed with this Bridge build", detail: nil)
             }
             return try upOpenVPN(name: name, config: try OpenVPNConfig.parse(configText).applying(settings),
-                                 secrets: secrets)
+                                 secrets: secrets, settings: settings)
         }
     }
 
@@ -199,14 +199,16 @@ final class TunnelManager {
         }
     }
 
-    private func upOpenVPN(name: String, config: OpenVPNConfig, secrets: TunnelSecrets) throws -> TunnelStatus {
+    private func upOpenVPN(name: String, config: OpenVPNConfig, secrets: TunnelSecrets,
+                           settings: TunnelSettings) throws -> TunnelStatus {
         try checkFullTunnelConflict(config.redirectsGateway)
         log("up '\(name)' (OpenVPN, \(config.remotes.first ?? "?"))")
         let tunnel = ActiveTunnel(name: name, kind: .openvpn, wireGuard: nil, openVPN: config,
                                   backendPath: OpenVPNBackend.executablePath)
         tunnels[name] = tunnel
         do {
-            let (backend, warnings) = try OpenVPNBackend.start(tunnel: name, config: config, secrets: secrets) {
+            let (backend, warnings) = try OpenVPNBackend.start(tunnel: name, config: config, secrets: secrets,
+                                                               settings: settings) {
                 [weak self] pid in
                 self?.queue.async { self?.backendExited(name: name, pid: pid) }
             }

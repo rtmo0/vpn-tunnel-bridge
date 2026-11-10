@@ -78,8 +78,9 @@ AllowedIPs = 0.0.0.0/0, ::/0
         s.networks = ["10.20.0.0/16"]
         s.dnsMode = .custom
         s.dnsServers = ["10.20.0.53"]
-        s.splitDNSDomains = ["corp.example"]
+        s.splitDNSDomains = ["corp.example", "other.example"]
         let text = try base.applying(s).render()
+        #expect(text.contains("dhcp-option DOMAIN-SEARCH other.example"))
         #expect(text.contains("pull-filter ignore redirect-gateway"))
         #expect(text.contains(#"pull-filter ignore "route ""#))
         #expect(text.contains("route 10.20.0.0 255.255.0.0"))
