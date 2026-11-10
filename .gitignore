@@ -7,3 +7,4 @@ build/
 # Never commit real tunnel configs: they contain private keys.
 *.conf
 !Tests/**/*.example.conf
+.vscode/
