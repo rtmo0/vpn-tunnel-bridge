@@ -48,6 +48,9 @@ jobs:
       - name: Build OpenVPN
         run: scripts/build-openvpn.sh
 
+      - name: Build Xray (VLESS)
+        run: scripts/build-xray.sh
+
       - name: Build Bridge.app
         run: |
           export VERSION="${VERSION#v}"

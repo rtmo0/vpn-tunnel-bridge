@@ -136,6 +136,7 @@ final class AppModel: ObservableObject {
             return
         }
         let canOpenVPN = capabilities.contains(.openvpn)
+        let canVLESS = capabilities.contains(.vless)
         setBusy(name, true)
         work.async {
             var failure: String?
@@ -143,6 +144,9 @@ final class AppModel: ObservableObject {
                 let (text, kind) = try TunnelLibrary.load(name)
                 if kind == .openvpn && !canOpenVPN {
                     throw ClientError("The installed helper has no OpenVPN. Choose “Update Helper…” in the Bridge menu.")
+                }
+                if kind == .vless && !canVLESS {
+                    throw ClientError("The installed helper has no VLESS support. Choose “Update Helper…” in the Bridge menu.")
                 }
                 _ = try Connector.connect(name: name, text: text, kind: kind) { prompt in
                     DispatchQueue.main.sync { Prompter.ask(prompt) }
@@ -216,18 +220,34 @@ final class AppModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "Import Tunnels"
-        panel.message = "WireGuard / AmneziaWG (.conf) or OpenVPN (.ovpn) files"
+        panel.message = "WireGuard / AmneziaWG (.conf), OpenVPN (.ovpn) or files with vless:// links"
         panel.prompt = "Import"
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return }
         var errors: [String] = []
         for url in panel.urls {
-            do { try TunnelLibrary.importFile(at: url) } catch {
+            do { _ = try TunnelLibrary.importFile(at: url) } catch {
                 errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
             }
         }
         if !errors.isEmpty { Alerts.show("Some files could not be imported", errors.joined(separator: "\n")) }
+        refresh()
+    }
+
+    /// Imports vless:// links (or a base64 subscription) from the clipboard.
+    func importFromClipboard() {
+        NSApp.activate(ignoringOtherApps: true)
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        do {
+            let result = try TunnelLibrary.importLinks(text)
+            if !result.errors.isEmpty {
+                let title = result.saved.isEmpty ? "The links could not be imported" : "Some links could not be imported"
+                Alerts.show(title, result.errors.joined(separator: "\n"))
+            }
+        } catch {
+            Alerts.show("Nothing to import", "Copy one or more vless:// links (or a subscription) first.")
+        }
         refresh()
     }
 

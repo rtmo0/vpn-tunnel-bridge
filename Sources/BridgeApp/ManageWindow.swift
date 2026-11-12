@@ -78,7 +78,7 @@ struct ManageView: View {
             Divider()
             HStack(spacing: 2) {
                 Button { model.importConfigs() } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
-                    .help("Import tunnels from .conf / .ovpn files")
+                    .help("Import tunnels from .conf / .ovpn files or files with vless:// links")
                 Button {
                     if let name = selection.name { model.remove(name) }
                 } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
@@ -103,9 +103,10 @@ struct ManageView: View {
             ContentUnavailableView {
                 Label("No Tunnel Selected", systemImage: "shield")
             } description: {
-                Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +")
+                Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +, or paste a vless:// link")
             } actions: {
                 Button("Import Tunnels…") { model.importConfigs() }
+                Button("Paste VLESS Link") { model.importFromClipboard() }
             }
         }
     }
@@ -186,6 +187,26 @@ struct ConfigSummary {
             if c.staticChallenge != nil { login.append("one-time code") }
             if c.hasEncryptedPrivateKey { login.append("key passphrase") }
             self.login = login.joined(separator: " + ")
+        case .vless:
+            guard let c = try? VLESSConfig.parse(text) else { return }
+            servers = c.endpoint
+            dns = VLESSConfig.defaultDNS.joined(separator: ", ") + " (Bridge default)"
+            routes = "All traffic (IPv6 when the server supports it)"
+            var p: [(String, String)] = [("Transport", c.transport.rawValue), ("Security", c.security.rawValue)]
+            if let flow = c.flow { p.append(("Flow", flow)) }
+            if c.encryption != "none" { p.append(("Encryption", "\(c.encryption.prefix(24))…")) }
+            if let sni = c.serverName { p.append(("SNI", sni)) }
+            if c.security != .none { p.append(("Fingerprint", c.fingerprint ?? "chrome")) }
+            if !c.alpn.isEmpty { p.append(("ALPN", c.alpn.joined(separator: ","))) }
+            if c.pinnedPeerCertSha256 != nil { p.append(("Pinned certificate", "yes")) }
+            if let sid = c.realityShortID { p.append(("Short ID", sid)) }
+            if let spx = c.realitySpiderX { p.append(("SpiderX", spx)) }
+            if let host = c.hostHeader { p.append(("Host", host)) }
+            if let path = c.path { p.append(("Path", path)) }
+            if let service = c.serviceName { p.append(("Service name", service)) }
+            if let mode = c.mode { p.append(("Mode", mode)) }
+            if c.extra != nil { p.append(("Extra", "custom")) }
+            parameters = p.map { (name: $0.0, value: $0.1) }
         }
     }
 }
@@ -332,7 +353,8 @@ struct TunnelDetail: View {
             if !status.addresses.isEmpty { LabeledContent("Addresses", value: status.addresses.joined(separator: ", ")) }
             if !status.dnsServers.isEmpty { LabeledContent("DNS", value: status.dnsServers.joined(separator: ", ")) }
             if status.kind != .openvpn {
-                LabeledContent("Last handshake", value: status.lastHandshake.map { ago($0) } ?? "Never")
+                LabeledContent(status.kind == .vless ? "Last check" : "Last handshake",
+                               value: status.lastHandshake.map { ago($0) } ?? "Never")
             }
             LabeledContent("Traffic", value: "↓ \(bytes(status.rxBytes))   ↑ \(bytes(status.txBytes))")
             ForEach(status.warnings, id: \.self) { warning in
@@ -348,9 +370,10 @@ struct TunnelDetail: View {
                 if !s.addresses.isEmpty { LabeledContent("Addresses", value: s.addresses) }
                 if !s.dns.isEmpty { LabeledContent("DNS", value: s.dns) }
                 if !s.routes.isEmpty { LabeledContent("Routes", value: s.routes) }
-                if s.kind != .openvpn { LabeledContent("MTU", value: s.mtu) }
+                if s.kind != .openvpn && s.kind != .vless { LabeledContent("MTU", value: s.mtu) }
                 if !s.parameters.isEmpty {
-                    DisclosureGroup("AmneziaWG parameters (\(s.parameters.count))") {
+                    DisclosureGroup(s.kind == .vless ? "VLESS settings (\(s.parameters.count))"
+                                    : "AmneziaWG parameters (\(s.parameters.count))") {
                         ForEach(s.parameters, id: \.name) { p in
                             LabeledContent(p.name) { Text(p.value).font(.callout.monospaced()) }
                         }
@@ -431,8 +454,11 @@ struct TunnelDetail: View {
         let base: String
         switch settings.routing {
         case .config:
-            base = summary?.kind == .openvpn ? "Uses the routes the OpenVPN server pushes."
-                : "Uses AllowedIPs from the configuration."
+            switch summary?.kind {
+            case .openvpn: base = "Uses the routes the OpenVPN server pushes."
+            case .vless: base = "All traffic. IPv6 goes through the tunnel when the server can reach IPv6, otherwise it is blocked."
+            default: base = "Uses AllowedIPs from the configuration."
+            }
         case .allTraffic: base = "Everything goes through the tunnel."
         case .onlyListed: base = "Split tunnelling: only these networks use the VPN, everything else goes direct."
         case .allExceptListed: base = "These networks go direct, everything else uses the VPN."

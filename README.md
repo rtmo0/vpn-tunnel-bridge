@@ -5,7 +5,7 @@
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-**Tunnel Bridge** is a free, open-source VPN client for macOS that lives in the menu bar. It connects **AmneziaWG**, **WireGuard** and **OpenVPN** tunnels from ordinary `.conf` and `.ovpn` files, and it can keep several of them up at once.
+**Tunnel Bridge** is a free, open-source VPN client for macOS that lives in the menu bar. It connects **AmneziaWG**, **WireGuard**, **OpenVPN** and **VLESS** tunnels from ordinary `.conf` and `.ovpn` files or `vless://` links, and it can keep several of them up at once.
 
 Bridge started as a replacement for clients that silently drop newer AmneziaWG settings. It passes every parameter of AmneziaWG 1.0, 1.5 and 2.0 to the backend, and it refuses a config with a key it doesn't understand instead of quietly ignoring it.
 
@@ -19,6 +19,7 @@ It needs no Network Extension, no Apple Developer account and no App Store. A sm
 | ✅ | **AmneziaWG** with every parameter: `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` (including ranges), `I1`–`I5`, `HeaderProtectionKey`, `ContentPaddingAddition`, timing options |
 | ✅ | **WireGuard** configs as they are |
 | ✅ | **OpenVPN 2.7**: username and password, certificates, passphrase-protected keys, one-time codes (static challenge), DNS pushed by the server |
+| ✅ | **VLESS** (Xray-core) from `vless://` links or subscriptions: REALITY, XTLS Vision, XHTTP, WebSocket, gRPC, HTTPUpgrade, TLS with pinned certificates. IPv6 goes through the tunnel when the server has it |
 | ✅ | Several tunnels at the same time |
 | ✅ | Manage Tunnels window: live status, config summary, built-in config editor, rename, remove |
 | ✅ | Split tunnelling: all traffic, only listed networks, or everything except listed networks |
@@ -37,7 +38,7 @@ It needs no Network Extension, no Apple Developer account and no App Store. A sm
 
 - macOS 14 Sonoma or later.
 - An administrator account on the Mac (needed once, to install the network helper).
-- **Apple Silicon** (M1 or later) for all three protocols. On **Intel** Macs, AmneziaWG and WireGuard work; OpenVPN is currently built for Apple Silicon only.
+- **Apple Silicon** (M1 or later) for all protocols. On **Intel** Macs, AmneziaWG, WireGuard and VLESS work; OpenVPN is currently built for Apple Silicon only.
 
 ### 1. Download
 
@@ -87,6 +88,7 @@ The helper is a background service (`/Library/PrivilegedHelperTools/com.rtmo0.br
 2. Pick one or more `.conf` (WireGuard / AmneziaWG) or `.ovpn` (OpenVPN) files.
    - For OpenVPN, certificates and keys that the `.ovpn` points to are copied into Bridge. You can delete the original files afterwards.
    - If the `.ovpn` comes with a login file (`auth-user-pass file.txt`), the username and password go into the Keychain.
+   - For VLESS, copy one or more `vless://` links (or a subscription) and choose **Import VLESS Link from Clipboard** (⇧⌘V). A file with links works with **Import Tunnel(s) from File…** too.
 3. To connect, click the tunnel's name in the menu. A check mark means it's connected; the line underneath shows uptime and speed.
 
 OpenVPN servers that need a login ask for a username and password the first time. Tick **Remember in Keychain** and you won't be asked again.
@@ -109,7 +111,8 @@ Open **System Settings → General → Login Items** and add **Bridge** under *O
 | **Status** | Connected tunnel, connecting, inactive, or a helper or kill switch notice |
 | Tunnel names | Click to connect or disconnect. ✓ = connected; animated dots = connecting |
 | **Disconnect All** | Shown while anything is connected |
-| **Import Tunnel(s) from File…** | Add `.conf` / `.ovpn` files |
+| **Import Tunnel(s) from File…** | Add `.conf` / `.ovpn` files or files with `vless://` links |
+| **Import VLESS Link from Clipboard** (⇧⌘V) | Add copied `vless://` links or a base64 subscription |
 | **Manage Tunnels…** (⌘,) | The window with details and settings |
 | **Update to Bridge x.y…** | Shown when a new release is out |
 | **Unblock Internet (Kill Switch)** | Shown when a dropped tunnel's kill switch is blocking traffic |
@@ -118,7 +121,7 @@ Open **System Settings → General → Login Items** and add **Bridge** under *O
 
 Select a tunnel on the left. On the right:
 
-- **Status**: uptime, server, interface, addresses, DNS, last handshake (WireGuard), traffic.
+- **Status**: uptime, server, interface, addresses, DNS, last handshake (WireGuard) or last check (VLESS), traffic.
 - **Configuration**: what the config says. AmneziaWG parameters are listed under a disclosure triangle. **Edit…** opens the config in a text editor that checks it before saving.
 - **Sign-in** (OpenVPN with a login): view or change the saved username and password.
 - **Routing**:
@@ -139,6 +142,13 @@ The **+** and **−** buttons at the bottom of the list import and remove tunnel
 ### Kill switch
 
 With **Kill switch** on, while that tunnel is connected, the Mac can reach only the tunnel, the VPN server, DHCP and the local network. If the tunnel drops unexpectedly, traffic **stays blocked** so nothing leaks. To get the internet back, reconnect the tunnel or choose **Unblock Internet (Kill Switch)** in the menu. Disconnecting the tunnel yourself lifts the block.
+
+### VLESS
+
+- A share link carries no DNS, so Bridge uses 1.1.1.1 and 1.0.0.1 through the tunnel. Choose others under **DNS → Custom**.
+- *Connected* means Bridge fetched a real HTTP answer through the server; it checks every 30 seconds and shows the delay. A wrong key or user ID shows as *Server not responding* (details in the tunnel's log).
+- After connecting, Bridge checks whether the server reaches IPv6. If it does, IPv6 goes through the tunnel too; if not, IPv6 stays blocked so it can't leak around the tunnel.
+- Links that turn certificate checks off (`allowInsecure=1`) are refused: pin a self-signed certificate with `pcs=<sha256>` instead. Unknown link parameters are refused too, never ignored.
 
 ### Network changes and IPv6
 
@@ -178,6 +188,7 @@ Installing the helper also puts `bridge` in `/usr/local/bin`:
 
 ```bash
 bridge import my-server.conf      # add to the library
+bridge import 'vless://…'         # add a VLESS link (or a file / subscription with several)
 bridge list                       # saved tunnels and their state
 bridge up my-server               # connect
 bridge status                     # handshake, traffic, interface
@@ -196,6 +207,8 @@ bridge-helper (root, launchd)
   │                         split default route (0/1 + 128/1), pinned server route
   ├─ openvpn                driven via its management socket; Bridge answers password
   │                         prompts and is its route-up and dns-updown hook
+  ├─ xray run -c …          VLESS: Xray creates the utun, Bridge writes its config from
+  │                         the link and sets routes, DNS and the pinned server route
   ├─ DNS                    System Configuration dynamic store
   └─ pf anchor com.apple/bridge   kill switch and IPv6 leak protection
 ```
@@ -207,6 +220,7 @@ bridge-helper (root, launchd)
 
 - Only root and members of the `admin` group can talk to the helper (checked with `getpeereid`).
 - The helper refuses to run backends that aren't owned by root or are writable by others.
+- VLESS links are parsed by Bridge, and Bridge writes the Xray configuration itself: no user-supplied JSON reaches the root process.
 - Scripts from config files never run. `PreUp`/`PostUp`/… in WireGuard configs and `up`/`down`/`plugin`/`tls-verify`/… in OpenVPN configs are stripped. OpenVPN configs must be self-contained (no file references, no `config` includes) when they reach the helper.
 - Keys and passwords never appear in logs. OpenVPN passwords live in the Keychain.
 
@@ -219,6 +233,7 @@ git clone https://github.com/rtmo0/vpn-tunnel-bridge.git
 cd vpn-tunnel-bridge
 brew install go openssl@3 lz4 lzo pkgconf
 scripts/build-openvpn.sh   # OpenVPN with static OpenSSL, LZ4 and LZO (optional)
+scripts/build-xray.sh      # Xray-core for VLESS (optional)
 scripts/build.sh           # amneziawg-go, CLI, helper → build/Bridge.app
 open build/Bridge.app
 ```
@@ -229,7 +244,7 @@ open build/Bridge.app
 
 | Path | Contents |
 | --- | --- |
-| `Sources/BridgeCore` | Config parsers (wg-quick, OpenVPN), settings, UAPI, helper protocol |
+| `Sources/BridgeCore` | Config parsers (wg-quick, OpenVPN, VLESS links), settings, UAPI, helper protocol |
 | `Sources/BridgeClient` | Tunnel library, Keychain, connect flow with password prompts |
 | `Sources/BridgeApp` | Menu bar app, Manage Tunnels window, updater |
 | `Sources/bridge-helper` | Privileged daemon: backends, routes, DNS, firewall, network monitor |
@@ -245,4 +260,4 @@ Bridge is free and open source. If it keeps you connected, you can support devel
 
 MIT, see [LICENSE](LICENSE). Copyright © 2026 Andrey Samarin.
 
-Bundled backends keep their own licenses: [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (MIT) and [OpenVPN](https://github.com/OpenVPN/openvpn) (GPL-2.0, built from unmodified upstream source).
+Bundled backends keep their own licenses: [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (MIT), [OpenVPN](https://github.com/OpenVPN/openvpn) (GPL-2.0) and [Xray-core](https://github.com/XTLS/Xray-core) (MPL-2.0), each built from unmodified upstream source.

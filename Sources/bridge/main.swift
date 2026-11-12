@@ -7,8 +7,9 @@ bridge — Tunnel Bridge command-line client
 
 USAGE
   bridge import <file> [--name <name>]       Save a .conf (WireGuard/AmneziaWG) or .ovpn to your library
+  bridge import 'vless://…' [--name <name>]  Save a VLESS link (or a file / subscription with several)
   bridge list                                List saved tunnels and whether they are connected
-  bridge up <name | file> [--name <n>]       Connect a tunnel
+  bridge up <name | file | link> [--name <n>]  Connect a tunnel
   bridge down <name> | --all                 Disconnect
   bridge status [name]                       Live status
   bridge check <name | file>                 Validate a config and show what will be applied
@@ -41,6 +42,10 @@ func takeFlag(_ name: String) -> Bool {
 
 /// A saved tunnel name or a path to a config file.
 func resolve(_ reference: String, nameOverride: String?) throws -> (name: String, loaded: TunnelLibrary.Loaded) {
+    if VLESSConfig.isLink(reference) {
+        let loaded = try TunnelLibrary.loadedVLESS(reference, fallbackName: "vless")
+        return (nameOverride.map(TunnelName.sanitized) ?? loaded.suggestedName, loaded)
+    }
     let path = (reference as NSString).expandingTildeInPath
     var isDirectory: ObjCBool = false
     if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue {
@@ -115,7 +120,11 @@ func printStatus(_ s: TunnelStatus) {
     if !s.addresses.isEmpty { print("  addresses:  \(s.addresses.joined(separator: ", "))") }
     if !s.dnsServers.isEmpty { print("  dns:        \(s.dnsServers.joined(separator: ", "))") }
     print("  routing:    \(s.fullTunnel ? "all traffic" : "selected networks")")
-    if s.kind != .openvpn { print("  handshake:  \(ago(s.lastHandshake))") }
+    if s.kind == .vless {
+        print("  last check: \(ago(s.lastHandshake))")
+    } else if s.kind != .openvpn {
+        print("  handshake:  \(ago(s.lastHandshake))")
+    }
     print("  traffic:    received \(bytes(s.rxBytes)), sent \(bytes(s.txBytes))")
     for warning in s.warnings { print("  note: \(warning)") }
 }
@@ -153,6 +162,19 @@ func describe(_ loaded: TunnelLibrary.Loaded) throws {
         if config.hasEncryptedPrivateKey { print("key:        passphrase-protected") }
         let prepared = try config.prepared(tunnel: "check", managementSocket: "/dev/null", eventCommand: "true")
         for warning in prepared.warnings { print("note: \(warning)") }
+    case .vless:
+        let config = try VLESSConfig.parse(loaded.text)
+        print("server:     \(config.endpoint)")
+        print("transport:  \(config.transport.rawValue), security \(config.security.rawValue)"
+            + (config.flow.map { ", flow \($0)" } ?? ""))
+        if let sni = config.serverName { print("sni:        \(sni)") }
+        if config.security != .none { print("fingerprint: \(config.fingerprint ?? "chrome")") }
+        if let path = config.path { print("path:       \(path)") }
+        if let host = config.hostHeader { print("host:       \(host)") }
+        if let service = config.serviceName { print("service:    \(service)") }
+        if let mode = config.mode { print("mode:       \(mode)") }
+        print("dns:        \(VLESSConfig.defaultDNS.joined(separator: ", ")) (default, change in settings)")
+        print("routing:    all traffic; IPv6 too if the server reaches it")
     }
 }
 
@@ -168,10 +190,22 @@ func run() throws {
     switch command {
     case "import":
         let name = try takeOption("--name")
-        guard let file = arguments.first else { throw CLIError("Usage: bridge import <file> [--name <name>]") }
-        let saved = try TunnelLibrary.importFile(at: URL(fileURLWithPath: (file as NSString).expandingTildeInPath),
+        guard let file = arguments.first else { throw CLIError("Usage: bridge import <file | vless://…> [--name <name>]") }
+        let saved: [SavedTunnel]
+        if VLESSConfig.isLink(file), let name {
+            _ = try VLESSConfig.parse(file)
+            saved = [try TunnelLibrary.save(VLESSConfig.normalized(file), kind: .vless, as: TunnelName.sanitized(name))]
+        } else if VLESSConfig.isLink(file) {
+            let result = try TunnelLibrary.importLinks(file)
+            for error in result.errors { print("! \(error)") }
+            saved = result.saved
+        } else {
+            saved = try TunnelLibrary.importFile(at: URL(fileURLWithPath: (file as NSString).expandingTildeInPath),
                                                  as: name)
-        print("Saved '\(saved.name)' (\(saved.kind.displayName)). Connect with: bridge up \(saved.name)")
+        }
+        for tunnel in saved {
+            print("Saved '\(tunnel.name)' (\(tunnel.kind.displayName)). Connect with: bridge up \(tunnel.name)")
+        }
 
     case "list":
         let saved = TunnelLibrary.list()

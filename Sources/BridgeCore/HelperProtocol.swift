@@ -9,7 +9,7 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 4
+    public static let version = 5
 }
 
 /// Secrets supplied by the client for a single connection attempt.

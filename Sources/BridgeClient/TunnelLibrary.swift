@@ -8,7 +8,8 @@ public struct SavedTunnel: Hashable, Sendable {
 }
 
 /// Saved tunnel configs in ~/Library/Application Support/Bridge/Tunnels
-/// (`<name>.conf` for WireGuard/AmneziaWG, `<name>.ovpn` for OpenVPN).
+/// (`<name>.conf` for WireGuard/AmneziaWG, `<name>.ovpn` for OpenVPN, `<name>.vless`
+/// holding a VLESS share link).
 public enum TunnelLibrary {
     public static var directory: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -19,11 +20,13 @@ public enum TunnelLibrary {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.compactMap { url -> SavedTunnel? in
             let ext = url.pathExtension.lowercased()
-            guard ext == "conf" || ext == "ovpn" else { return nil }
+            guard ext == "conf" || ext == "ovpn" || ext == "vless" else { return nil }
             let name = url.deletingPathExtension().lastPathComponent
             let kind: TunnelKind
             if ext == "ovpn" {
                 kind = .openvpn
+            } else if ext == "vless" {
+                kind = .vless
             } else {
                 kind = (try? String(contentsOf: url, encoding: .utf8)).map(TunnelKind.detect) ?? .amneziawg
             }
@@ -68,6 +71,12 @@ public enum TunnelLibrary {
         let name = TunnelName.sanitized(url.deletingPathExtension().lastPathComponent)
         let kind = TunnelKind.detect(raw)
         switch kind {
+        case .vless:
+            let links = try Self.vlessLinks(in: raw)
+            guard links.count == 1 else {
+                throw ClientError("The file holds \(links.count) VLESS links; import it as a list instead")
+            }
+            return try loadedVLESS(links[0], fallbackName: name)
         case .amneziawg, .wireguard:
             let config = try TunnelConfig.parse(raw)
             return Loaded(suggestedName: name, kind: kind, text: raw,
@@ -79,10 +88,64 @@ public enum TunnelLibrary {
         }
     }
 
-    /// Imports a config file into the library and returns the saved entry.
+    // MARK: VLESS links
+
+    /// VLESS links in pasted text or a file: one per line, or a base64 subscription.
+    public static func vlessLinks(in text: String) throws -> [String] {
+        func links(_ text: String) -> [String] {
+            text.split(whereSeparator: \.isNewline).map { VLESSConfig.normalized(String($0)) }
+                .filter(VLESSConfig.isLink)
+        }
+        var found = links(text)
+        if found.isEmpty {
+            // Subscriptions are usually the same list encoded as (url-safe) base64.
+            let compact = text.filter { !$0.isWhitespace }
+            var b64 = compact.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            while b64.count % 4 != 0 { b64.append("=") }
+            if let data = Data(base64Encoded: b64), let decoded = String(data: data, encoding: .utf8) {
+                found = links(decoded)
+            }
+        }
+        guard !found.isEmpty else { throw ClientError("No vless:// links found") }
+        return found
+    }
+
+    public static func loadedVLESS(_ link: String, fallbackName: String) throws -> Loaded {
+        let config = try VLESSConfig.parse(link)
+        let name = config.remark.map(TunnelName.sanitized) ?? fallbackName
+        return Loaded(suggestedName: name == "tunnel" ? fallbackName : name, kind: .vless,
+                      text: VLESSConfig.normalized(link), embedded: .init(), warnings: [])
+    }
+
+    /// Imports every VLESS link in `text` (e.g. pasted from the clipboard).
+    /// Links that fail are reported in `errors`; the rest are saved.
+    public static func importLinks(_ text: String) throws -> (saved: [SavedTunnel], errors: [String]) {
+        var saved: [SavedTunnel] = []
+        var errors: [String] = []
+        for (index, link) in try vlessLinks(in: text).enumerated() {
+            do {
+                saved.append(try store(try loadedVLESS(link, fallbackName: "vless-\(index + 1)"), as: nil))
+            } catch {
+                errors.append("Link \(index + 1): \(error.localizedDescription)")
+            }
+        }
+        return (saved, errors)
+    }
+
+    /// Imports a config file into the library and returns the saved entries
+    /// (a file of VLESS links gives one tunnel per link).
     @discardableResult
-    public static func importFile(at url: URL, as requestedName: String? = nil) throws -> SavedTunnel {
-        let loaded = try read(fileAt: url)
+    public static func importFile(at url: URL, as requestedName: String? = nil) throws -> [SavedTunnel] {
+        let raw = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        if requestedName == nil, TunnelKind.detect(raw) == .vless, let links = try? vlessLinks(in: raw), links.count > 1 {
+            let result = try importLinks(raw)
+            if !result.errors.isEmpty { throw ClientError(result.errors.joined(separator: "\n")) }
+            return result.saved
+        }
+        return [try store(try read(fileAt: url), as: requestedName)]
+    }
+
+    private static func store(_ loaded: Loaded, as requestedName: String?) throws -> SavedTunnel {
         var name = requestedName.map(TunnelName.sanitized) ?? loaded.suggestedName
         if requestedName == nil {
             var counter = 2
@@ -110,7 +173,7 @@ public enum TunnelLibrary {
                                                 attributes: [.posixPermissions: 0o700])
         // Replace any existing entry with the same name but another extension.
         if let existing = find(name) { try? FileManager.default.removeItem(at: existing.url) }
-        let url = directory.appendingPathComponent("\(name).\(kind == .openvpn ? "ovpn" : "conf")")
+        let url = directory.appendingPathComponent("\(name).\(kind.fileExtension)")
         try Data(text.utf8).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         return SavedTunnel(name: name, kind: kind, url: url)
@@ -152,6 +215,9 @@ public enum TunnelLibrary {
         let kind = TunnelKind.detect(text)
         switch kind {
         case .amneziawg, .wireguard: _ = try TunnelConfig.parse(text)
+        case .vless:
+            _ = try VLESSConfig.parse(text)
+            return try save(VLESSConfig.normalized(text), kind: kind, as: name)
         case .openvpn:
             let config = try OpenVPNConfig.parse(text)
             _ = try config.prepared(tunnel: name, managementSocket: "/dev/null", eventCommand: "true")
