@@ -7,7 +7,8 @@ bridge — Tunnel Bridge command-line client
 
 USAGE
   bridge import <file> [--name <name>]       Save a .conf (WireGuard/AmneziaWG) or .ovpn to your library
-  bridge import 'vless://…' [--name <name>]  Save a VLESS link (or a file / subscription with several)
+  bridge import '<link>' [--name <name>]     Save a vless:// / trojan:// / hysteria2:// link (or a file /
+                                             subscription with several)
   bridge list                                List saved tunnels and whether they are connected
   bridge up <name | file | link> [--name <n>]  Connect a tunnel
   bridge down <name> | --all                 Disconnect
@@ -15,6 +16,12 @@ USAGE
   bridge check <name | file>                 Validate a config and show what will be applied
   bridge remove <name>                       Delete a saved tunnel (and its saved passwords)
   bridge forget <name>                       Delete saved passwords of a tunnel
+
+  bridge profile import <file | happ://…>    Import a routing profile (routing.json) and its geo files
+  bridge profile list                        Imported routing profiles and the tunnels using them
+  bridge profile use <tunnel> <profile|none> Route a VLESS / Trojan / Hysteria 2 tunnel by a profile
+  bridge profile update <profile>            Download the profile's geo files again
+  bridge profile remove <profile>            Delete a routing profile
 
 Library: ~/Library/Application Support/Bridge/Tunnels
 """
@@ -42,8 +49,8 @@ func takeFlag(_ name: String) -> Bool {
 
 /// A saved tunnel name or a path to a config file.
 func resolve(_ reference: String, nameOverride: String?) throws -> (name: String, loaded: TunnelLibrary.Loaded) {
-    if VLESSConfig.isLink(reference) {
-        let loaded = try TunnelLibrary.loadedVLESS(reference, fallbackName: "vless")
+    if ProxyLink.isLink(reference) {
+        let loaded = try TunnelLibrary.loadedLink(reference, fallbackName: "tunnel")
         return (nameOverride.map(TunnelName.sanitized) ?? loaded.suggestedName, loaded)
     }
     let path = (reference as NSString).expandingTildeInPath
@@ -120,7 +127,7 @@ func printStatus(_ s: TunnelStatus) {
     if !s.addresses.isEmpty { print("  addresses:  \(s.addresses.joined(separator: ", "))") }
     if !s.dnsServers.isEmpty { print("  dns:        \(s.dnsServers.joined(separator: ", "))") }
     print("  routing:    \(s.fullTunnel ? "all traffic" : "selected networks")")
-    if s.kind == .vless {
+    if s.kind.usesXray {
         print("  last check: \(ago(s.lastHandshake))")
     } else if s.kind != .openvpn {
         print("  handshake:  \(ago(s.lastHandshake))")
@@ -162,18 +169,14 @@ func describe(_ loaded: TunnelLibrary.Loaded) throws {
         if config.hasEncryptedPrivateKey { print("key:        passphrase-protected") }
         let prepared = try config.prepared(tunnel: "check", managementSocket: "/dev/null", eventCommand: "true")
         for warning in prepared.warnings { print("note: \(warning)") }
-    case .vless:
-        let config = try VLESSConfig.parse(loaded.text)
-        print("server:     \(config.endpoint)")
-        print("transport:  \(config.transport.rawValue), security \(config.security.rawValue)"
-            + (config.flow.map { ", flow \($0)" } ?? ""))
-        if let sni = config.serverName { print("sni:        \(sni)") }
-        if config.security != .none { print("fingerprint: \(config.fingerprint ?? "chrome")") }
-        if let path = config.path { print("path:       \(path)") }
-        if let host = config.hostHeader { print("host:       \(host)") }
-        if let service = config.serviceName { print("service:    \(service)") }
-        if let mode = config.mode { print("mode:       \(mode)") }
-        print("dns:        \(VLESSConfig.defaultDNS.joined(separator: ", ")) (default, change in settings)")
+    case .vless, .trojan, .hysteria2:
+        let link = try ProxyLink.parse(loaded.text)
+        print("server:     \(link.endpoint)")
+        for row in link.summary {
+            let label = row.name.lowercased() + ":"
+            print("\(label.padding(toLength: max(11, label.count), withPad: " ", startingAt: 0)) \(row.value)")
+        }
+        print("dns:        \(ProxyLink.defaultDNS.joined(separator: ", ")) (default, change in settings)")
         print("routing:    all traffic; IPv6 too if the server reaches it")
     }
 }
@@ -190,12 +193,12 @@ func run() throws {
     switch command {
     case "import":
         let name = try takeOption("--name")
-        guard let file = arguments.first else { throw CLIError("Usage: bridge import <file | vless://…> [--name <name>]") }
+        guard let file = arguments.first else { throw CLIError("Usage: bridge import <file | link> [--name <name>]") }
         let saved: [SavedTunnel]
-        if VLESSConfig.isLink(file), let name {
-            _ = try VLESSConfig.parse(file)
-            saved = [try TunnelLibrary.save(VLESSConfig.normalized(file), kind: .vless, as: TunnelName.sanitized(name))]
-        } else if VLESSConfig.isLink(file) {
+        if ProxyLink.isLink(file), let name {
+            let link = try ProxyLink.parse(file)
+            saved = [try TunnelLibrary.save(ProxyLink.normalized(file), kind: link.kind, as: TunnelName.sanitized(name))]
+        } else if ProxyLink.isLink(file) {
             let result = try TunnelLibrary.importLinks(file)
             for error in result.errors { print("! \(error)") }
             saved = result.saved
@@ -205,6 +208,56 @@ func run() throws {
         }
         for tunnel in saved {
             print("Saved '\(tunnel.name)' (\(tunnel.kind.displayName)). Connect with: bridge up \(tunnel.name)")
+        }
+
+    case "profile":
+        guard let sub = arguments.first else { throw CLIError("Usage: bridge profile import | list | use | update | remove") }
+        arguments.removeFirst()
+        switch sub {
+        case "import":
+            guard let source = arguments.first else { throw CLIError("Usage: bridge profile import <file | happ://…>") }
+            let path = (source as NSString).expandingTildeInPath
+            let text = FileManager.default.fileExists(atPath: path) ? try String(contentsOfFile: path, encoding: .utf8) : source
+            let name = try RoutingProfiles.importProfile(text)
+            print("Imported routing profile '\(name)'. Use it with: bridge profile use <tunnel> \(name)")
+        case "list":
+            let profiles = RoutingProfiles.list()
+            if profiles.isEmpty { print("No routing profiles. Import one with: bridge profile import <file>") }
+            let users = TunnelLibrary.list().map { ($0.name, TunnelLibrary.settings(for: $0.name).routingProfile) }
+            for name in profiles {
+                let profile = try? RoutingProfiles.load(name)
+                let used = users.filter { $0.1 == name }.map(\.0)
+                print("\(name.padding(toLength: 24, withPad: " ", startingAt: 0)) "
+                    + (profile.map { $0.globalProxy ? "default: proxy" : "default: direct" } ?? "unreadable")
+                    + (used.isEmpty ? "" : "   used by \(used.joined(separator: ", "))"))
+            }
+        case "use":
+            guard arguments.count >= 2 else { throw CLIError("Usage: bridge profile use <tunnel> <profile | none>") }
+            let tunnel = arguments[0], profile = arguments[1]
+            guard let saved = TunnelLibrary.find(tunnel) else { throw CLIError("No saved tunnel named '\(tunnel)'") }
+            var settings = TunnelLibrary.settings(for: tunnel)
+            if profile == "none" {
+                settings.routingProfile = nil
+            } else {
+                guard saved.kind.usesXray else {
+                    throw CLIError("Routing profiles work with VLESS, Trojan and Hysteria 2 tunnels only")
+                }
+                guard RoutingProfiles.list().contains(profile) else { throw CLIError("No routing profile named '\(profile)'") }
+                settings.routingProfile = profile
+            }
+            try TunnelLibrary.saveSettings(settings, for: tunnel)
+            print(profile == "none" ? "'\(tunnel)' no longer uses a routing profile."
+                  : "'\(tunnel)' now uses routing profile '\(profile)'. Reconnect it to apply.")
+        case "update":
+            guard let name = arguments.first else { throw CLIError("Usage: bridge profile update <profile>") }
+            try RoutingProfiles.update(name)
+            print("Updated the geo files of '\(name)'.")
+        case "remove":
+            guard let name = arguments.first else { throw CLIError("Usage: bridge profile remove <profile>") }
+            try RoutingProfiles.remove(name)
+            print("Removed routing profile '\(name)'.")
+        default:
+            throw CLIError("Unknown profile command '\(sub)'")
         }
 
     case "list":

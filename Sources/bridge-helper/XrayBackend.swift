@@ -1,14 +1,14 @@
 import BridgeCore
 import Foundation
 
-/// One running Xray process for a VLESS tunnel.
+/// One running Xray process for a VLESS, Trojan or Hysteria 2 tunnel.
 ///
-/// Xray creates the utun and turns its packets into VLESS connections; Bridge
+/// Xray creates the utun and turns its packets into proxy connections; Bridge
 /// owns routes, DNS and the firewall exactly as for WireGuard. Because Xray's
 /// TUN stack accepts every TCP connection locally, a working tunnel is
 /// recognised by a real HTTP answer fetched through Xray (the "probe"), not by
 /// a handshake.
-final class VLESSBackend: TunnelBackend {
+final class XrayBackend: TunnelBackend {
     let process: Process
     let interface: String
     /// Unit number of the utun, also used to pick non-overlapping addresses.
@@ -30,6 +30,8 @@ final class VLESSBackend: TunnelBackend {
     /// The utun's local IPv4 address (Xray assigns it: the address after the gateway).
     var localIPv4: String { Self.addresses(unit: unit).local }
     var gateway: String { Self.addresses(unit: unit).gateway }
+    /// The utun's far side: the system resolver points here when a routing profile answers DNS.
+    var peerIPv4: String { String(gateway.split(separator: "/")[0]) }
     var localIPv6: IPNetwork { IPNetwork("fd62:7269:6467:\(String(unit, radix: 16))::2/64")! }
 
     /// 198.18.0.0/15 is reserved for benchmarking, so it never clashes with a real network.
@@ -66,8 +68,9 @@ final class VLESSBackend: TunnelBackend {
 
     // MARK: Start / stop
 
-    static func start(tunnel: String, config: VLESSConfig, serverAddress: String,
-                      onExit: @escaping (Int32) -> Void) throws -> VLESSBackend {
+    static func start(tunnel: String, link: ProxyLink, serverAddress: String, profile: RoutingProfile? = nil,
+                      profileAssets: String? = nil, directInterface: String? = nil,
+                      onExit: @escaping (Int32) -> Void) throws -> XrayBackend {
         let path = executablePath
         try AmneziaBackend.verifyExecutable(path)
 
@@ -76,9 +79,10 @@ final class VLESSBackend: TunnelBackend {
         }
         let interface = "utun\(unit)"
         let probePorts = (ipv4: try freeLoopbackPort(), ipv6: try freeLoopbackPort())
-        let json = try config.xrayConfiguration(address: serverAddress, interface: interface,
+        let json = try link.xrayConfiguration(address: serverAddress, interface: interface,
                                                 gateway: addresses(unit: unit).gateway, mtu: 1500,
-                                                probePorts: probePorts)
+                                                probePorts: probePorts, profile: profile,
+                                                directInterface: directInterface)
         // The file holds the user ID: root-only, and removed when the tunnel stops.
         let configPath = "\(AmneziaBackend.runDirectory)/\(tunnel).xray.json"
         unlink(configPath)
@@ -100,7 +104,7 @@ final class VLESSBackend: TunnelBackend {
         process.arguments = ["run", "-c", configPath]
         // Keep Xray from looking for geo files or configs anywhere else.
         process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                               "XRAY_LOCATION_ASSET": AmneziaBackend.runDirectory]
+                               "XRAY_LOCATION_ASSET": profileAssets ?? AmneziaBackend.runDirectory]
         process.currentDirectoryURL = URL(fileURLWithPath: AmneziaBackend.runDirectory)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = logHandle ?? FileHandle.nullDevice
@@ -114,7 +118,7 @@ final class VLESSBackend: TunnelBackend {
         }
         log("  xray pid \(process.processIdentifier) started")
 
-        let backend = VLESSBackend(process: process, interface: interface, unit: unit, configPath: configPath,
+        let backend = XrayBackend(process: process, interface: interface, unit: unit, configPath: configPath,
                                    probePorts: probePorts)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
@@ -133,6 +137,31 @@ final class VLESSBackend: TunnelBackend {
         return backend
     }
 
+    /// Copies a routing profile's geo files into a root-owned folder for Xray.
+    /// The source folder belongs to the user; only regular files of sane size are taken.
+    static func installAssets(from source: String, tunnel: String, profile: RoutingProfile) throws -> String {
+        let destination = "\(AmneziaBackend.runDirectory)/\(tunnel).assets"
+        try? FileManager.default.removeItem(atPath: destination)
+        try FileManager.default.createDirectory(atPath: destination, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        for (needed, file) in [(profile.needsGeoIP, "geoip.dat"), (profile.needsGeoSite, "geosite.dat")] where needed {
+            let path = "\(source)/\(file)"
+            let fd = open(path, O_RDONLY | O_NOFOLLOW)
+            guard fd >= 0 else { throw HelperError("Routing profile file \(file) not found") }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            var info = stat()
+            guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= 64 << 20 else {
+                throw HelperError("Routing profile file \(file) is not a regular file of a sane size")
+            }
+            let data = handle.readDataToEndOfFile()
+            guard FileManager.default.createFile(atPath: "\(destination)/\(file)", contents: data,
+                                                 attributes: [.posixPermissions: 0o644]) else {
+                throw HelperError("Could not copy \(file)")
+            }
+        }
+        return destination
+    }
+
     func stop() {
         lock.withLock { stopped = true }
         if process.isRunning { terminate(pid: process.processIdentifier) }
@@ -144,7 +173,7 @@ final class VLESSBackend: TunnelBackend {
     /// Checks the tunnel right away and then periodically on a background thread.
     func startProbing() {
         let thread = Thread { [weak self] in self?.probeLoop() }
-        thread.name = "vless-probe-\(interface)"
+        thread.name = "xray-probe-\(interface)"
         thread.start()
     }
 
@@ -166,7 +195,7 @@ final class VLESSBackend: TunnelBackend {
                 _health.consecutiveFailures += 1
                 return false
             }
-            if firstSuccess { log("  '\(interface)' VLESS tunnel works (\(Int(latency * 1000)) ms)") }
+            if firstSuccess { log("  \(interface): tunnel works (\(Int(latency * 1000)) ms)") }
 
             // IPv6: ask once the tunnel works; retry a couple of times, then give up.
             if ok, health.ipv6 == nil, ipv6Attempts < 3 {

@@ -22,10 +22,14 @@ final class ActiveTunnel {
     let kind: TunnelKind
     let wireGuard: TunnelConfig?
     let openVPN: OpenVPNConfig?
-    let vless: VLESSConfig?
-    let vlessRouting: VLESSConfig.Routing?
-    /// VLESS: IPv6 address and routes are added once the server proves it reaches IPv6.
+    let proxy: ProxyLink?
+    let proxyRouting: ProxyRouting?
+    /// Xray tunnels: IPv6 address and routes are added once the server proves it reaches IPv6.
     var ipv6Active = false
+    /// Xray tunnels with a routing profile: what is needed to start them again when the
+    /// uplink changes (direct traffic is bound to the uplink interface by name).
+    var xrayRequest: (text: String, profile: RoutingProfile, assets: String?)?
+    var directInterface: String?
     let startedAt = Date()
     var backend: TunnelBackend?
     var backendPath: String
@@ -36,20 +40,20 @@ final class ActiveTunnel {
     var serverIPs: [String] = []
 
     init(name: String, kind: TunnelKind, wireGuard: TunnelConfig?, openVPN: OpenVPNConfig?,
-         vless: VLESSConfig? = nil, vlessRouting: VLESSConfig.Routing? = nil, backendPath: String) {
+         proxy: ProxyLink? = nil, proxyRouting: ProxyRouting? = nil, backendPath: String) {
         self.name = name
         self.kind = kind
         self.wireGuard = wireGuard
         self.openVPN = openVPN
-        self.vless = vless
-        self.vlessRouting = vlessRouting
+        self.proxy = proxy
+        self.proxyRouting = proxyRouting
         self.backendPath = backendPath
         self.warnings = wireGuard?.warnings ?? []
     }
 
     var routesAllTraffic: Bool {
         if let wireGuard { return wireGuard.isFullTunnel }
-        if let vlessRouting { return vlessRouting.isFullTunnel }
+        if let proxyRouting { return proxyRouting.isFullTunnel }
         if let backend = backend as? OpenVPNBackend { return backend.fullTunnel || (openVPN?.redirectsGateway ?? false) }
         return openVPN?.redirectsGateway ?? false
     }
@@ -71,7 +75,7 @@ final class TunnelManager {
     var capabilities: [TunnelKind] {
         var kinds: [TunnelKind] = [.amneziawg, .wireguard]
         if OpenVPNBackend.isAvailable { kinds.append(.openvpn) }
-        if VLESSBackend.isAvailable { kinds.append(.vless) }
+        if XrayBackend.isAvailable { kinds += [.vless, .trojan, .hysteria2] }
         return kinds
     }
 
@@ -99,7 +103,7 @@ final class TunnelManager {
                 guard let text = request.config else { return .failure("No configuration supplied", code: .invalidConfig) }
                 let settings = request.settings ?? TunnelSettings()
                 let status = try up(name: name, configText: text, secrets: request.secrets ?? TunnelSecrets(),
-                                    settings: settings)
+                                    settings: settings, profile: request.profile, profileAssets: request.profileAssets)
                 tunnels[name]?.settings = settings
                 killSwitchHolds[name] = nil
                 updateFirewall()
@@ -129,12 +133,16 @@ final class TunnelManager {
 
     // MARK: Up
 
-    private func up(name: String, configText: String, secrets: TunnelSecrets,
-                    settings: TunnelSettings) throws -> TunnelStatus {
+    private func up(name: String, configText: String, secrets: TunnelSecrets, settings: TunnelSettings,
+                    profile: RoutingProfile? = nil, profileAssets: String? = nil) throws -> TunnelStatus {
         guard tunnels[name] == nil else {
             throw CodedError(code: .alreadyConnected, message: "Tunnel '\(name)' is already connected", detail: nil)
         }
         let kind = TunnelKind.detect(configText)
+        if profile != nil && !kind.usesXray {
+            throw CodedError(code: .invalidConfig,
+                             message: "Routing profiles work with VLESS, Trojan and Hysteria 2 tunnels only", detail: nil)
+        }
         switch kind {
         case .amneziawg, .wireguard:
             let (config, bypass) = try TunnelConfig.parse(configText).applying(settings)
@@ -145,13 +153,24 @@ final class TunnelManager {
             }
             return try upOpenVPN(name: name, config: try OpenVPNConfig.parse(configText).applying(settings),
                                  secrets: secrets, settings: settings)
-        case .vless:
-            guard VLESSBackend.isAvailable else {
-                throw CodedError(code: .unsupported, message: "VLESS (Xray) is not installed with this Bridge build",
+        case .vless, .trojan, .hysteria2:
+            guard XrayBackend.isAvailable else {
+                throw CodedError(code: .unsupported,
+                                 message: "\(kind.displayName) needs Xray, which is not installed with this Bridge build",
                                  detail: nil)
             }
-            let config = try VLESSConfig.parse(configText)
-            return try upVLESS(name: name, config: config, routing: try config.routing(settings))
+            let link = try ProxyLink.parse(configText)
+            if settings.routingProfile != nil && profile == nil {
+                throw CodedError(code: .invalidConfig, message: "The routing profile was not sent", detail: nil)
+            }
+            if let profile, settings.killSwitch, profile.sendsTrafficDirect {
+                throw CodedError(code: .invalidConfig, message: "The kill switch would block the traffic that routing "
+                    + "profile “\(profile.name)” sends direct. Turn one of them off.", detail: nil)
+            }
+            let status = try upXray(name: name, link: link, routing: try link.routing(settings), profile: profile,
+                                    profileAssets: profileAssets)
+            if let profile { tunnels[name]?.xrayRequest = (configText, profile, profileAssets) }
+            return status
         }
     }
 
@@ -287,16 +306,18 @@ final class TunnelManager {
         }
     }
 
-    private func upVLESS(name: String, config: VLESSConfig, routing: VLESSConfig.Routing) throws -> TunnelStatus {
+    private func upXray(name: String, link: ProxyLink, routing: ProxyRouting, profile: RoutingProfile? = nil,
+                        profileAssets: String? = nil) throws -> TunnelStatus {
         try checkFullTunnelConflict(routing.isFullTunnel)
-        log("up '\(name)' (VLESS \(config.transport.rawValue)/\(config.security.rawValue), \(config.endpoint))")
-        let tunnel = ActiveTunnel(name: name, kind: .vless, wireGuard: nil, openVPN: nil, vless: config,
-                                  vlessRouting: routing, backendPath: VLESSBackend.executablePath)
+        let transport = link.summary.first { $0.name == "Transport" }?.value ?? ""
+        log("up '\(name)' (\(link.kind.displayName) \(transport), \(link.endpoint))")
+        let tunnel = ActiveTunnel(name: name, kind: link.kind, wireGuard: nil, openVPN: nil, proxy: link,
+                                  proxyRouting: routing, backendPath: XrayBackend.executablePath)
         tunnel.warnings = []
         tunnels[name] = tunnel
         do {
             // Xray gets the server as an IP: resolving it later would go through the tunnel itself.
-            let server = try Resolver.resolve(Endpoint("\(config.endpoint)")!)
+            let server = try Resolver.resolve(Endpoint(link.endpoint)!)
             let ip = server.address
             tunnel.serverIPs = ["\(ip)"]
 
@@ -321,7 +342,23 @@ final class TunnelManager {
             }
             saveState()
 
-            let backend = try VLESSBackend.start(tunnel: name, config: config, serverAddress: "\(ip)") {
+            var assets: String?
+            var directInterface: String?
+            if let profile {
+                if let profileAssets, profile.needsGeoIP || profile.needsGeoSite {
+                    assets = try XrayBackend.installAssets(from: profileAssets, tunnel: name, profile: profile)
+                }
+                guard let uplink = Routes.uplink(excluding: ourInterfaces)?.interface, !Routes.isVirtual(uplink) else {
+                    throw HelperError("No physical network for the direct traffic of routing profile “\(profile.name)”")
+                }
+                directInterface = uplink
+                tunnel.directInterface = uplink
+                tunnel.warnings.append("Routing profile “\(profile.name)”: rules decide what goes direct; "
+                    + "DNS is answered by the profile's servers.")
+                log("  routing profile '\(profile.name)', direct traffic via \(uplink)")
+            }
+            let backend = try XrayBackend.start(tunnel: name, link: link, serverAddress: "\(ip)", profile: profile,
+                                                profileAssets: assets, directInterface: directInterface) {
                 [weak self] pid in
                 self?.queue.async { self?.backendExited(name: name, pid: pid) }
             }
@@ -337,8 +374,10 @@ final class TunnelManager {
             }
             saveState()
 
-            let dns = DNSSettings(servers: routing.dnsServers.map(\.description), searchDomains: routing.dnsSearchDomains,
-                                  fullTunnel: routing.isFullTunnel && !routing.dnsOnlyForDomains,
+            // With a routing profile, Xray answers DNS itself (via the utun's far side).
+            let dnsServers = profile == nil ? routing.dnsServers.map(\.description) : [backend.peerIPv4]
+            let dns = DNSSettings(servers: dnsServers, searchDomains: profile == nil ? routing.dnsSearchDomains : [],
+                                  fullTunnel: routing.isFullTunnel && (profile != nil || !routing.dnsOnlyForDomains),
                                   interface: backend.interface, ipv4Addresses: [backend.localIPv4], ipv6Addresses: [])
             if let warning = self.dns.apply(tunnel: name, dns) { tunnel.warnings.append(warning) }
 
@@ -362,9 +401,9 @@ final class TunnelManager {
         }
     }
 
-    /// The VLESS server reaches IPv6: give the utun an address and route IPv6 into it.
-    private func enableIPv6(_ tunnel: ActiveTunnel, backend: VLESSBackend) {
-        guard !tunnel.ipv6Active, let routing = tunnel.vlessRouting, !routing.ipv6Networks.isEmpty else { return }
+    /// The proxy server reaches IPv6: give the utun an address and route IPv6 into it.
+    private func enableIPv6(_ tunnel: ActiveTunnel, backend: XrayBackend) {
+        guard !tunnel.ipv6Active, let routing = tunnel.proxyRouting, !routing.ipv6Networks.isEmpty else { return }
         do {
             try runChecked("/sbin/ifconfig", [backend.interface, "inet6", backend.localIPv6.description, "alias"])
         } catch {
@@ -420,6 +459,7 @@ final class TunnelManager {
         tunnel.routes.removeAll()
         unlink("\(AmneziaBackend.runDirectory)/\(tunnel.name).ifname")
         unlink("\(AmneziaBackend.runDirectory)/\(tunnel.name).xray.json")
+        try? FileManager.default.removeItem(atPath: "\(AmneziaBackend.runDirectory)/\(tunnel.name).assets")
     }
 
     private func backendExited(name: String, pid: Int32) {
@@ -461,7 +501,7 @@ final class TunnelManager {
                 let hasIPv6: Bool
                 if let config = tunnel.wireGuard {
                     hasIPv6 = config.addresses.contains(where: \.isIPv6)
-                } else if tunnel.vless != nil {
+                } else if tunnel.proxy != nil {
                     hasIPv6 = tunnel.ipv6Active
                 } else if let backend = tunnel.backend as? OpenVPNBackend {
                     hasIPv6 = backend.snapshot.localIPv6 != nil
@@ -493,6 +533,23 @@ final class TunnelManager {
         if let last = lastUplink, last.gateway == uplink.gateway, last.interface == uplink.interface { return }
         log("network change: uplink is now \(uplink.gateway ?? "-") on \(uplink.interface ?? "?")")
         lastUplink = uplink
+
+        // Routing-profile tunnels bind direct traffic to the old interface: start them again.
+        for tunnel in tunnels.values.sorted(by: { $0.name < $1.name }) {
+            guard let request = tunnel.xrayRequest, request.profile.sendsTrafficDirect,
+                  tunnel.directInterface != uplink.interface else { continue }
+            let name = tunnel.name, settings = tunnel.settings
+            log("  restarting '\(name)': its routing profile sends direct traffic via \(uplink.interface ?? "?") now")
+            teardown(tunnel)
+            tunnels[name] = nil
+            do {
+                _ = try up(name: name, configText: request.text, secrets: TunnelSecrets(), settings: settings,
+                           profile: request.profile, profileAssets: request.assets)
+                tunnels[name]?.settings = settings
+            } catch {
+                log("  could not restart '\(name)': \(error)")
+            }
+        }
 
         for tunnel in tunnels.values {
             guard let backend = tunnel.backend else { continue }
@@ -598,7 +655,7 @@ final class TunnelManager {
                 lastHandshake: nil, rxBytes: s.rx, txBytes: s.tx, peers: [],
                 warnings: tunnel.warnings + [backend.dnsWarning].compactMap { $0 })
         }
-        if let backend = tunnel.backend as? VLESSBackend, let config = tunnel.vless, let routing = tunnel.vlessRouting {
+        if let backend = tunnel.backend as? XrayBackend, let link = tunnel.proxy, let routing = tunnel.proxyRouting {
             let health = backend.health
             let counters = Interface.counters(backend.interface) ?? (0, 0)
             // The probe runs every 30 s while healthy; two misses mean trouble.
@@ -614,8 +671,8 @@ final class TunnelManager {
             var addresses = [backend.localIPv4]
             if tunnel.ipv6Active { addresses.append(backend.localIPv6.description) }
             return TunnelStatus(
-                name: tunnel.name, kind: .vless, interface: backend.interface, pid: backend.pid,
-                startedAt: tunnel.startedAt, connected: fresh, state: state, server: config.endpoint,
+                name: tunnel.name, kind: link.kind, interface: backend.interface, pid: backend.pid,
+                startedAt: tunnel.startedAt, connected: fresh, state: state, server: link.endpoint,
                 addresses: addresses, dnsServers: dns.servers(for: tunnel.name), fullTunnel: routing.isFullTunnel,
                 lastHandshake: health.lastSuccess, rxBytes: counters.rx, txBytes: counters.tx, peers: [],
                 warnings: tunnel.warnings)
@@ -653,6 +710,7 @@ final class TunnelManager {
                 terminate(pid: entry.pid, grace: 5)
                 log("  stopped stale backend pid \(entry.pid) of '\(entry.name)'")
             }
+            try? FileManager.default.removeItem(atPath: "\(AmneziaBackend.runDirectory)/\(entry.name).assets")
             for route in entry.routes.reversed() { Routes.delete(route) }
             dns.remove(tunnel: entry.name)
             for suffix in ["ovpn", "mgmt", "ifname", "xray.json"] { unlink("\(AmneziaBackend.runDirectory)/\(entry.name).\(suffix)") }

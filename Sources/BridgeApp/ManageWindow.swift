@@ -78,7 +78,7 @@ struct ManageView: View {
             Divider()
             HStack(spacing: 2) {
                 Button { model.importConfigs() } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
-                    .help("Import tunnels from .conf / .ovpn files or files with vless:// links")
+                    .help("Import tunnels from .conf / .ovpn files or files with share links")
                 Button {
                     if let name = selection.name { model.remove(name) }
                 } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
@@ -103,10 +103,11 @@ struct ManageView: View {
             ContentUnavailableView {
                 Label("No Tunnel Selected", systemImage: "shield")
             } description: {
-                Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +, or paste a vless:// link")
+                Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +, "
+                     + "or paste a vless://, trojan:// or hysteria2:// link")
             } actions: {
                 Button("Import Tunnels…") { model.importConfigs() }
-                Button("Paste VLESS Link") { model.importFromClipboard() }
+                Button("Paste Links") { model.importFromClipboard() }
             }
         }
     }
@@ -187,26 +188,12 @@ struct ConfigSummary {
             if c.staticChallenge != nil { login.append("one-time code") }
             if c.hasEncryptedPrivateKey { login.append("key passphrase") }
             self.login = login.joined(separator: " + ")
-        case .vless:
-            guard let c = try? VLESSConfig.parse(text) else { return }
-            servers = c.endpoint
-            dns = VLESSConfig.defaultDNS.joined(separator: ", ") + " (Bridge default)"
+        case .vless, .trojan, .hysteria2:
+            guard let link = try? ProxyLink.parse(text) else { return }
+            servers = link.endpoint
+            dns = ProxyLink.defaultDNS.joined(separator: ", ") + " (Bridge default)"
             routes = "All traffic (IPv6 when the server supports it)"
-            var p: [(String, String)] = [("Transport", c.transport.rawValue), ("Security", c.security.rawValue)]
-            if let flow = c.flow { p.append(("Flow", flow)) }
-            if c.encryption != "none" { p.append(("Encryption", "\(c.encryption.prefix(24))…")) }
-            if let sni = c.serverName { p.append(("SNI", sni)) }
-            if c.security != .none { p.append(("Fingerprint", c.fingerprint ?? "chrome")) }
-            if !c.alpn.isEmpty { p.append(("ALPN", c.alpn.joined(separator: ","))) }
-            if c.pinnedPeerCertSha256 != nil { p.append(("Pinned certificate", "yes")) }
-            if let sid = c.realityShortID { p.append(("Short ID", sid)) }
-            if let spx = c.realitySpiderX { p.append(("SpiderX", spx)) }
-            if let host = c.hostHeader { p.append(("Host", host)) }
-            if let path = c.path { p.append(("Path", path)) }
-            if let service = c.serviceName { p.append(("Service name", service)) }
-            if let mode = c.mode { p.append(("Mode", mode)) }
-            if c.extra != nil { p.append(("Extra", "custom")) }
-            parameters = p.map { (name: $0.0, value: $0.1) }
+            parameters = link.summary
         }
     }
 }
@@ -353,7 +340,7 @@ struct TunnelDetail: View {
             if !status.addresses.isEmpty { LabeledContent("Addresses", value: status.addresses.joined(separator: ", ")) }
             if !status.dnsServers.isEmpty { LabeledContent("DNS", value: status.dnsServers.joined(separator: ", ")) }
             if status.kind != .openvpn {
-                LabeledContent(status.kind == .vless ? "Last check" : "Last handshake",
+                LabeledContent(status.kind.usesXray ? "Last check" : "Last handshake",
                                value: status.lastHandshake.map { ago($0) } ?? "Never")
             }
             LabeledContent("Traffic", value: "↓ \(bytes(status.rxBytes))   ↑ \(bytes(status.txBytes))")
@@ -370,9 +357,9 @@ struct TunnelDetail: View {
                 if !s.addresses.isEmpty { LabeledContent("Addresses", value: s.addresses) }
                 if !s.dns.isEmpty { LabeledContent("DNS", value: s.dns) }
                 if !s.routes.isEmpty { LabeledContent("Routes", value: s.routes) }
-                if s.kind != .openvpn && s.kind != .vless { LabeledContent("MTU", value: s.mtu) }
+                if s.kind != .openvpn && !s.kind.usesXray { LabeledContent("MTU", value: s.mtu) }
                 if !s.parameters.isEmpty {
-                    DisclosureGroup(s.kind == .vless ? "VLESS settings (\(s.parameters.count))"
+                    DisclosureGroup(s.kind.usesXray ? "\(s.kind.displayName) settings (\(s.parameters.count))"
                                     : "AmneziaWG parameters (\(s.parameters.count))") {
                         ForEach(s.parameters, id: \.name) { p in
                             LabeledContent(p.name) { Text(p.value).font(.callout.monospaced()) }
@@ -442,11 +429,41 @@ struct TunnelDetail: View {
             }
             Toggle("Keep local networks off the VPN", isOn: $settings.excludeLocalNetworks)
             Toggle("Kill switch", isOn: $settings.killSwitch)
+            if summary?.kind.usesXray == true { profilePicker }
         } header: {
             Text("Routing")
         } footer: {
             Text(routingFooter).font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var profilePicker: some View {
+        HStack {
+            Picker("Routing profile", selection: $settings.routingProfile) {
+                Text("None").tag(String?.none)
+                ForEach(model.routingProfiles, id: \.self) { Text($0).tag(Optional($0)) }
+            }
+            Menu {
+                Button("Import from File…") { model.importRoutingProfile(fromClipboard: false) { settings.routingProfile = $0 } }
+                Button("Paste from Clipboard") { model.importRoutingProfile(fromClipboard: true) { settings.routingProfile = $0 } }
+                if let profile = settings.routingProfile {
+                    Divider()
+                    Button("Update “\(profile)”") { model.updateRoutingProfile(profile) }
+                    Button("Remove “\(profile)”…", role: .destructive) {
+                        if model.removeRoutingProfile(profile) {
+                            settings.routingProfile = nil
+                            saved.routingProfile = nil
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Import, update or remove routing profiles (routing.json, happ://routing links)")
         }
     }
 
@@ -456,15 +473,20 @@ struct TunnelDetail: View {
         case .config:
             switch summary?.kind {
             case .openvpn: base = "Uses the routes the OpenVPN server pushes."
-            case .vless: base = "All traffic. IPv6 goes through the tunnel when the server can reach IPv6, otherwise it is blocked."
+            case .vless, .trojan, .hysteria2: base = "All traffic. IPv6 goes through the tunnel when the server can reach IPv6, otherwise it is blocked."
             default: base = "Uses AllowedIPs from the configuration."
             }
         case .allTraffic: base = "Everything goes through the tunnel."
         case .onlyListed: base = "Split tunnelling: only these networks use the VPN, everything else goes direct."
         case .allExceptListed: base = "These networks go direct, everything else uses the VPN."
         }
-        guard settings.killSwitch else { return base }
-        return base + " Kill switch: while connected, only the VPN, its server and your local network are reachable; "
+        var text = base
+        if let profile = settings.routingProfile {
+            text += " Routing profile “\(profile)” decides per site and network what goes through the VPN, direct "
+                + "or is blocked, and answers DNS; DNS settings below don't apply."
+        }
+        guard settings.killSwitch else { return text }
+        return text + " Kill switch: while connected, only the VPN, its server and your local network are reachable; "
             + "if the tunnel drops, traffic stays blocked until you reconnect or unblock it from the menu."
     }
 

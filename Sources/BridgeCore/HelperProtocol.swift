@@ -9,7 +9,7 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 5
+    public static let version = 6
 }
 
 /// Secrets supplied by the client for a single connection attempt.
@@ -45,9 +45,15 @@ public struct HelperRequest: Codable, Sendable {
     public var settings: TunnelSettings?
     public var event: String?
     public var environment: [String: String]?
+    /// The routing profile named in `settings`, and the folder holding its geoip.dat / geosite.dat.
+    public var profile: RoutingProfile?
+    public var profileAssets: String?
 
     public init(command: Command, name: String? = nil, config: String? = nil, secrets: TunnelSecrets? = nil,
-                settings: TunnelSettings? = nil, event: String? = nil, environment: [String: String]? = nil) {
+                settings: TunnelSettings? = nil, event: String? = nil, environment: [String: String]? = nil,
+                profile: RoutingProfile? = nil, profileAssets: String? = nil) {
+        self.profile = profile
+        self.profileAssets = profileAssets
         self.command = command
         self.name = name
         self.config = config

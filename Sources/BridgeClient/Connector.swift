@@ -143,11 +143,24 @@ public enum Connector {
             try askChallenge()
         }
 
+        var profile: RoutingProfile?
+        var profileAssets: String?
+        if let profileName = settings.routingProfile {
+            guard kind.usesXray else {
+                throw ClientError("Routing profiles work with VLESS, Trojan and Hysteria 2 tunnels only")
+            }
+            let loaded = try RoutingProfiles.load(profileName)
+            try RoutingProfiles.checkAssets(loaded, name: profileName)
+            profile = loaded
+            profileAssets = RoutingProfiles.folder(profileName).path
+        }
+
         var lastError = ClientError("Could not connect")
         for _ in 0..<4 {
             let response = try HelperClient.send(
                 HelperRequest(command: .up, name: name, config: text, secrets: kind == .openvpn ? secrets : nil,
-                              settings: settings.isDefault ? nil : settings))
+                              settings: settings.isDefault ? nil : settings, profile: profile,
+                              profileAssets: profileAssets))
             if response.ok, let status = response.tunnels?.first {
                 if rememberAuth, let user = secrets.username, let pass = secrets.password {
                     try? Keychain.saveCredentials(username: user, password: pass, for: name)

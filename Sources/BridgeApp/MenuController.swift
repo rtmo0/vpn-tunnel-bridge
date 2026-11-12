@@ -162,7 +162,7 @@ final class MenuController: NSObject, NSMenuDelegate {
             menu.addItem(action("Disconnect All", #selector(disconnectAll)))
         }
         menu.addItem(action("Import Tunnel(s) from File…", #selector(importConfigs), key: "o"))
-        menu.addItem(action("Import VLESS Link from Clipboard", #selector(importFromClipboard), key: "V"))
+        menu.addItem(action("Import Links from Clipboard", #selector(importFromClipboard), key: "V"))
         menu.addItem(action("Manage Tunnels…", #selector(manageTunnels), key: ","))
 
         menu.addItem(.separator())

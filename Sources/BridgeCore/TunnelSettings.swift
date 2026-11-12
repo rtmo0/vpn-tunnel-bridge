@@ -38,10 +38,14 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
     /// drops unexpectedly, until the user disconnects it. LAN and DHCP stay allowed.
     public var killSwitch = false
 
+    /// Name of an imported routing profile (VLESS, Trojan, Hysteria 2 only):
+    /// rule-based proxy / direct / block decisions and DNS made inside Xray.
+    public var routingProfile: String?
+
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case routing, networks, excludeLocalNetworks, dnsMode, dnsServers, splitDNSDomains, killSwitch
+        case routing, networks, excludeLocalNetworks, dnsMode, dnsServers, splitDNSDomains, killSwitch, routingProfile
     }
 
     /// Missing keys fall back to defaults, so settings saved by older versions keep working.
@@ -54,6 +58,7 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
         dnsServers = try c.decodeIfPresent([String].self, forKey: .dnsServers) ?? []
         splitDNSDomains = try c.decodeIfPresent([String].self, forKey: .splitDNSDomains) ?? []
         killSwitch = try c.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? false
+        routingProfile = try c.decodeIfPresent(String.self, forKey: .routingProfile)
     }
 
     public var isDefault: Bool { self == TunnelSettings() }

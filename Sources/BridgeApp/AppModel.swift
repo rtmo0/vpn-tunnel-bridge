@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import BridgeClient
 import BridgeCore
 import Foundation
@@ -136,7 +137,7 @@ final class AppModel: ObservableObject {
             return
         }
         let canOpenVPN = capabilities.contains(.openvpn)
-        let canVLESS = capabilities.contains(.vless)
+        let available = Set(capabilities)
         setBusy(name, true)
         work.async {
             var failure: String?
@@ -145,8 +146,9 @@ final class AppModel: ObservableObject {
                 if kind == .openvpn && !canOpenVPN {
                     throw ClientError("The installed helper has no OpenVPN. Choose “Update Helper…” in the Bridge menu.")
                 }
-                if kind == .vless && !canVLESS {
-                    throw ClientError("The installed helper has no VLESS support. Choose “Update Helper…” in the Bridge menu.")
+                if kind.usesXray && !available.contains(kind) {
+                    throw ClientError("The installed helper has no \(kind.displayName) support. "
+                        + "Choose “Update Helper…” in the Bridge menu.")
                 }
                 _ = try Connector.connect(name: name, text: text, kind: kind) { prompt in
                     DispatchQueue.main.sync { Prompter.ask(prompt) }
@@ -220,7 +222,7 @@ final class AppModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.title = "Import Tunnels"
-        panel.message = "WireGuard / AmneziaWG (.conf), OpenVPN (.ovpn) or files with vless:// links"
+        panel.message = "WireGuard / AmneziaWG (.conf), OpenVPN (.ovpn), or files with vless:// / trojan:// / hysteria2:// links"
         panel.prompt = "Import"
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -235,7 +237,7 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
-    /// Imports vless:// links (or a base64 subscription) from the clipboard.
+    /// Imports vless:// / trojan:// / hysteria2:// links (or a base64 subscription) from the clipboard.
     func importFromClipboard() {
         NSApp.activate(ignoringOtherApps: true)
         let text = NSPasteboard.general.string(forType: .string) ?? ""
@@ -246,9 +248,70 @@ final class AppModel: ObservableObject {
                 Alerts.show(title, result.errors.joined(separator: "\n"))
             }
         } catch {
-            Alerts.show("Nothing to import", "Copy one or more vless:// links (or a subscription) first.")
+            Alerts.show("Nothing to import",
+                        "Copy one or more vless://, trojan:// or hysteria2:// links (or a subscription) first.")
         }
         refresh()
+    }
+
+    // MARK: Routing profiles
+
+    var routingProfiles: [String] { RoutingProfiles.list() }
+
+    /// Imports a routing profile (routing.json or a happ://routing link) from a file or the
+    /// clipboard and downloads its geo files; calls `done` with the profile's name.
+    func importRoutingProfile(fromClipboard: Bool, done: @escaping (String) -> Void = { _ in }) {
+        NSApp.activate(ignoringOtherApps: true)
+        let text: String
+        if fromClipboard {
+            text = NSPasteboard.general.string(forType: .string) ?? ""
+        } else {
+            let panel = NSOpenPanel()
+            panel.title = "Import Routing Profile"
+            panel.message = "A routing profile (routing.json) for VLESS, Trojan and Hysteria 2 tunnels"
+            panel.prompt = "Import"
+            panel.allowedContentTypes = [.json, .plainText]
+            guard panel.runModal() == .OK, let url = panel.url,
+                  let contents = try? String(contentsOf: url, encoding: .utf8) else { return }
+            text = contents
+        }
+        work.async {
+            let result = Result { try RoutingProfiles.importProfile(text) }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let name):
+                    self.changed()
+                    done(name)
+                case .failure(let error):
+                    Alerts.show("Could not import the routing profile", error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func updateRoutingProfile(_ name: String) {
+        work.async {
+            let result = Result { try RoutingProfiles.update(name) }
+            DispatchQueue.main.async {
+                if case .failure(let error) = result {
+                    Alerts.show("Could not update “\(name)”", error.localizedDescription)
+                } else {
+                    Alerts.info("“\(name)” updated", "The geo files were downloaded again. Reconnect tunnels that use it.")
+                }
+            }
+        }
+    }
+
+    func removeRoutingProfile(_ name: String) -> Bool {
+        guard Alerts.confirm("Remove routing profile “\(name)”?",
+                             "Tunnels that use it go back to sending all traffic through the VPN.",
+                             button: "Remove") else { return false }
+        do { try RoutingProfiles.remove(name) } catch {
+            Alerts.show("Could not remove “\(name)”", error.localizedDescription)
+            return false
+        }
+        changed()
+        return true
     }
 
     func remove(_ name: String) {

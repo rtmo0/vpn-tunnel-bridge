@@ -62,7 +62,7 @@ do {
     log("! \(error)")
 }
 log(OpenVPNBackend.isAvailable ? "OpenVPN backend: \(OpenVPNBackend.executablePath)" : "OpenVPN backend not installed")
-log(VLESSBackend.isAvailable ? "VLESS backend: \(VLESSBackend.executablePath)" : "VLESS backend (xray) not installed")
+log(XrayBackend.isAvailable ? "Xray backend (VLESS, Trojan, Hysteria 2): \(XrayBackend.executablePath)" : "Xray backend not installed")
 
 let manager = TunnelManager()
 manager.queue.sync { manager.firewall.recover() }

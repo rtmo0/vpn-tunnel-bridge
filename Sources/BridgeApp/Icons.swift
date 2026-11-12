@@ -154,6 +154,8 @@ enum ProtocolIcon {
         case .wireguard: label = "WG"
         case .openvpn: label = "OVPN"
         case .vless: label = "VLS"
+        case .trojan: label = "TRJ"
+        case .hysteria2: label = "HY2"
         }
         let size = NSSize(width: 26, height: 15)
         let image = NSImage(size: size, flipped: false) { rect in

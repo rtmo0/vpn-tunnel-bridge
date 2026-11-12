@@ -8,8 +8,8 @@ public struct SavedTunnel: Hashable, Sendable {
 }
 
 /// Saved tunnel configs in ~/Library/Application Support/Bridge/Tunnels
-/// (`<name>.conf` for WireGuard/AmneziaWG, `<name>.ovpn` for OpenVPN, `<name>.vless`
-/// holding a VLESS share link).
+/// (`<name>.conf` for WireGuard/AmneziaWG, `<name>.ovpn` for OpenVPN, and
+/// `<name>.vless` / `.trojan` / `.hy2` holding a share link).
 public enum TunnelLibrary {
     public static var directory: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -20,13 +20,14 @@ public enum TunnelLibrary {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.compactMap { url -> SavedTunnel? in
             let ext = url.pathExtension.lowercased()
-            guard ext == "conf" || ext == "ovpn" || ext == "vless" else { return nil }
+            let linkKinds: [String: TunnelKind] = ["vless": .vless, "trojan": .trojan, "hy2": .hysteria2]
+            guard ext == "conf" || ext == "ovpn" || linkKinds[ext] != nil else { return nil }
             let name = url.deletingPathExtension().lastPathComponent
             let kind: TunnelKind
             if ext == "ovpn" {
                 kind = .openvpn
-            } else if ext == "vless" {
-                kind = .vless
+            } else if let linkKind = linkKinds[ext] {
+                kind = linkKind
             } else {
                 kind = (try? String(contentsOf: url, encoding: .utf8)).map(TunnelKind.detect) ?? .amneziawg
             }
@@ -70,13 +71,15 @@ public enum TunnelLibrary {
         }
         let name = TunnelName.sanitized(url.deletingPathExtension().lastPathComponent)
         let kind = TunnelKind.detect(raw)
-        switch kind {
-        case .vless:
-            let links = try Self.vlessLinks(in: raw)
+        if kind == .openvpn || kind.usesXray, let links = try? proxyLinks(in: raw) {
             guard links.count == 1 else {
-                throw ClientError("The file holds \(links.count) VLESS links; import it as a list instead")
+                throw ClientError("The file holds \(links.count) links; import it as a list instead")
             }
-            return try loadedVLESS(links[0], fallbackName: name)
+            return try loadedLink(links[0], fallbackName: name)
+        }
+        switch kind {
+        case .vless, .trojan, .hysteria2:
+            throw ClientError("No supported links in the file")
         case .amneziawg, .wireguard:
             let config = try TunnelConfig.parse(raw)
             return Loaded(suggestedName: name, kind: kind, text: raw,
@@ -88,13 +91,14 @@ public enum TunnelLibrary {
         }
     }
 
-    // MARK: VLESS links
+    // MARK: Share links (VLESS, Trojan, Hysteria 2)
 
-    /// VLESS links in pasted text or a file: one per line, or a base64 subscription.
-    public static func vlessLinks(in text: String) throws -> [String] {
+    /// Share links in pasted text or a file: one per line (comments and other
+    /// lines are skipped), or a base64 subscription.
+    public static func proxyLinks(in text: String) throws -> [String] {
         func links(_ text: String) -> [String] {
-            text.split(whereSeparator: \.isNewline).map { VLESSConfig.normalized(String($0)) }
-                .filter(VLESSConfig.isLink)
+            text.split(whereSeparator: \.isNewline).map { ProxyLink.normalized(String($0)) }
+                .filter(ProxyLink.isLink)
         }
         var found = links(text)
         if found.isEmpty {
@@ -106,25 +110,26 @@ public enum TunnelLibrary {
                 found = links(decoded)
             }
         }
-        guard !found.isEmpty else { throw ClientError("No vless:// links found") }
+        guard !found.isEmpty else { throw ClientError("No vless://, trojan:// or hysteria2:// links found") }
         return found
     }
 
-    public static func loadedVLESS(_ link: String, fallbackName: String) throws -> Loaded {
-        let config = try VLESSConfig.parse(link)
+    public static func loadedLink(_ link: String, fallbackName: String) throws -> Loaded {
+        let config = try ProxyLink.parse(link)
         let name = config.remark.map(TunnelName.sanitized) ?? fallbackName
-        return Loaded(suggestedName: name == "tunnel" ? fallbackName : name, kind: .vless,
-                      text: VLESSConfig.normalized(link), embedded: .init(), warnings: [])
+        return Loaded(suggestedName: name == "tunnel" ? fallbackName : name, kind: config.kind,
+                      text: ProxyLink.normalized(link), embedded: .init(), warnings: [])
     }
 
-    /// Imports every VLESS link in `text` (e.g. pasted from the clipboard).
+    /// Imports every share link in `text` (e.g. pasted from the clipboard).
     /// Links that fail are reported in `errors`; the rest are saved.
     public static func importLinks(_ text: String) throws -> (saved: [SavedTunnel], errors: [String]) {
         var saved: [SavedTunnel] = []
         var errors: [String] = []
-        for (index, link) in try vlessLinks(in: text).enumerated() {
+        for (index, link) in try proxyLinks(in: text).enumerated() {
             do {
-                saved.append(try store(try loadedVLESS(link, fallbackName: "vless-\(index + 1)"), as: nil))
+                let fallback = "\(ProxyLink.kind(of: link)?.fileExtension ?? "link")-\(index + 1)"
+                saved.append(try store(try loadedLink(link, fallbackName: fallback), as: nil))
             } catch {
                 errors.append("Link \(index + 1): \(error.localizedDescription)")
             }
@@ -137,7 +142,8 @@ public enum TunnelLibrary {
     @discardableResult
     public static func importFile(at url: URL, as requestedName: String? = nil) throws -> [SavedTunnel] {
         let raw = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        if requestedName == nil, TunnelKind.detect(raw) == .vless, let links = try? vlessLinks(in: raw), links.count > 1 {
+        let kind = TunnelKind.detect(raw)
+        if requestedName == nil, kind == .openvpn || kind.usesXray, let links = try? proxyLinks(in: raw), links.count > 1 {
             let result = try importLinks(raw)
             if !result.errors.isEmpty { throw ClientError(result.errors.joined(separator: "\n")) }
             return result.saved
@@ -215,9 +221,9 @@ public enum TunnelLibrary {
         let kind = TunnelKind.detect(text)
         switch kind {
         case .amneziawg, .wireguard: _ = try TunnelConfig.parse(text)
-        case .vless:
-            _ = try VLESSConfig.parse(text)
-            return try save(VLESSConfig.normalized(text), kind: kind, as: name)
+        case .vless, .trojan, .hysteria2:
+            _ = try ProxyLink.parse(text)
+            return try save(ProxyLink.normalized(text), kind: kind, as: name)
         case .openvpn:
             let config = try OpenVPNConfig.parse(text)
             _ = try config.prepared(tunnel: name, managementSocket: "/dev/null", eventCommand: "true")
