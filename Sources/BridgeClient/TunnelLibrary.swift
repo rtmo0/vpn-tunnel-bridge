@@ -20,7 +20,8 @@ public enum TunnelLibrary {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.compactMap { url -> SavedTunnel? in
             let ext = url.pathExtension.lowercased()
-            let linkKinds: [String: TunnelKind] = ["vless": .vless, "trojan": .trojan, "hy2": .hysteria2]
+            let linkKinds: [String: TunnelKind] = ["vless": .vless, "trojan": .trojan, "hy2": .hysteria2,
+                                                   "openconnect": .openconnect]
             guard ext == "conf" || ext == "ovpn" || linkKinds[ext] != nil else { return nil }
             let name = url.deletingPathExtension().lastPathComponent
             let kind: TunnelKind
@@ -88,7 +89,36 @@ public enum TunnelLibrary {
             let config = try OpenVPNConfig.parse(raw)
             let (inlined, embedded) = try config.inliningFiles(relativeTo: url.deletingLastPathComponent())
             return Loaded(suggestedName: name, kind: .openvpn, text: inlined.render(), embedded: embedded, warnings: [])
+        case .openconnect:
+            var config = try OpenConnectConfig.parse(raw)
+            // "Certificate = cert.pem" / "Key = key.pem": embed the files, like .ovpn imports do.
+            let folder = url.deletingLastPathComponent()
+            func embed(_ value: String?) throws -> String? {
+                guard let value, !value.contains("-----BEGIN"), !value.contains("\n") else { return value }
+                let path = (value as NSString).expandingTildeInPath
+                let file = path.hasPrefix("/") ? URL(fileURLWithPath: path) : folder.appendingPathComponent(path)
+                guard let data = try? Data(contentsOf: file) else { return value }
+                return String(data: data, encoding: .utf8).flatMap { $0.contains("-----BEGIN") ? $0 : nil }
+                    ?? data.base64EncodedString()
+            }
+            config.certificate = try embed(config.certificate)
+            config.key = try embed(config.key)
+            return Loaded(suggestedName: name, kind: .openconnect, text: config.render(), embedded: .init(), warnings: [])
         }
+    }
+
+    /// Saves a new OpenConnect profile and returns the entry (a unique name is picked).
+    @discardableResult
+    public static func addOpenConnect(_ config: OpenConnectConfig, name requested: String? = nil) throws -> SavedTunnel {
+        let base = TunnelName.sanitized(requested ?? config.host)
+        var name = base
+        var counter = 2
+        while find(name) != nil {
+            name = "\(base)-\(counter)"
+            counter += 1
+        }
+        _ = try OpenConnectConfig.parse(config.render())
+        return try save(config.render(), kind: .openconnect, as: name)
     }
 
     // MARK: Share links (VLESS, Trojan, Hysteria 2)
@@ -227,6 +257,8 @@ public enum TunnelLibrary {
         case .openvpn:
             let config = try OpenVPNConfig.parse(text)
             _ = try config.prepared(tunnel: name, managementSocket: "/dev/null", eventCommand: "true")
+        case .openconnect:
+            _ = try OpenConnectConfig.parse(text)
         }
         return try save(text, kind: kind, as: name)
     }

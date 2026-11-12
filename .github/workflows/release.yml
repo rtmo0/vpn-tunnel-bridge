@@ -51,6 +51,9 @@ jobs:
       - name: Build Xray (VLESS)
         run: scripts/build-xray.sh
 
+      - name: Build OpenConnect
+        run: scripts/build-openconnect.sh
+
       - name: Build Bridge.app
         run: |
           export VERSION="${VERSION#v}"

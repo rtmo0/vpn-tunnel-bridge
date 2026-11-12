@@ -91,6 +91,7 @@ public enum Connector {
     public static func connect(name: String, text: String, kind: TunnelKind,
                                embedded: OpenVPNConfig.EmbeddedSecrets = .init(),
                                settings: TunnelSettings? = nil,
+                               openConnectUI: OpenConnectLoginUI? = nil,
                                ask: (SecretPrompt) -> SecretAnswer?) throws -> TunnelStatus {
         let settings = settings ?? TunnelLibrary.settings(for: name)
         var secrets = TunnelSecrets()
@@ -155,10 +156,28 @@ public enum Connector {
             profileAssets = RoutingProfiles.folder(profileName).path
         }
 
+        // OpenConnect: log in as the user first; the helper only gets the session cookie.
+        var openConnectRemember: (username: String, password: String)?
+        func openConnectLogin() throws {
+            guard let ui = openConnectUI else {
+                throw ClientError("OpenConnect needs to log in interactively; use the Bridge app or a terminal")
+            }
+            let (session, remembered) = try OpenConnectLogin.run(config: try OpenConnectConfig.parse(text),
+                                                                 tunnel: name, ui: ui)
+            secrets.sessionCookie = session.cookie
+            secrets.serverFingerprint = session.fingerprint
+            secrets.connectURL = session.connectURL
+            secrets.resolve = session.resolve
+            openConnectRemember = remembered
+        }
+        if kind == .openconnect { try openConnectLogin() }
+        var openConnectRetried = false
+
         var lastError = ClientError("Could not connect")
         for _ in 0..<4 {
             let response = try HelperClient.send(
-                HelperRequest(command: .up, name: name, config: text, secrets: kind == .openvpn ? secrets : nil,
+                HelperRequest(command: .up, name: name, config: text,
+                              secrets: kind == .openvpn || kind == .openconnect ? secrets : nil,
                               settings: settings.isDefault ? nil : settings, profile: profile,
                               profileAssets: profileAssets))
             if response.ok, let status = response.tunnels?.first {
@@ -168,9 +187,20 @@ public enum Connector {
                 if rememberKey, let passphrase = secrets.keyPassphrase {
                     try? Keychain.savePassphrase(passphrase, for: name)
                 }
+                if let remembered = openConnectRemember {
+                    try? Keychain.saveCredentials(username: remembered.username, password: remembered.password, for: name)
+                }
                 return status
             }
             lastError = ClientError(response.error ?? "Could not connect", code: response.errorCode)
+            if kind == .openconnect {
+                // The session was refused (expired, or used up by a failed attempt): log in once more.
+                guard response.errorCode == .authenticationFailed || response.errorCode == .credentialsRequired,
+                      !openConnectRetried else { throw lastError }
+                openConnectRetried = true
+                try openConnectLogin()
+                continue
+            }
             switch response.errorCode {
             case .authenticationFailed:
                 Keychain.deleteCredentials(for: name)

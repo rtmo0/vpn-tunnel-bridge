@@ -9,7 +9,7 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 6
+    public static let version = 7
 }
 
 /// Secrets supplied by the client for a single connection attempt.
@@ -19,6 +19,12 @@ public struct TunnelSecrets: Codable, Sendable, Equatable {
     public var keyPassphrase: String?
     /// Response to an OpenVPN static challenge (e.g. an OTP code).
     public var challengeResponse: String?
+    /// OpenConnect: the session from logging in (done by the app as the user).
+    public var sessionCookie: String?
+    public var serverFingerprint: String?
+    public var connectURL: String?
+    /// `host:ip`, so the tunnel reaches the server node the login used.
+    public var resolve: String?
 
     public init(username: String? = nil, password: String? = nil, keyPassphrase: String? = nil,
                 challengeResponse: String? = nil) {
@@ -36,6 +42,8 @@ public struct HelperRequest: Codable, Sendable {
         case releaseKillSwitch
         /// Sent by OpenVPN's route-up/down hook (runs as root) back to the helper.
         case openvpnEvent
+        /// Sent by OpenConnect's vpnc-script (Bridge's helper, run as root).
+        case openconnectEvent
     }
 
     public var command: Command

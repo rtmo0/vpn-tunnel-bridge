@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TunnelKind: String, Codable, Sendable {
-    case amneziawg, wireguard, openvpn, vless, trojan, hysteria2
+    case amneziawg, wireguard, openvpn, vless, trojan, hysteria2, openconnect
 
     public var displayName: String {
         switch self {
@@ -11,6 +11,7 @@ public enum TunnelKind: String, Codable, Sendable {
         case .vless: "VLESS"
         case .trojan: "Trojan"
         case .hysteria2: "Hysteria 2"
+        case .openconnect: "OpenConnect"
         }
     }
 
@@ -22,6 +23,7 @@ public enum TunnelKind: String, Codable, Sendable {
         case .vless: "vless"
         case .trojan: "trojan"
         case .hysteria2: "hy2"
+        case .openconnect: "openconnect"
         }
     }
 
@@ -29,7 +31,7 @@ public enum TunnelKind: String, Codable, Sendable {
     public var usesXray: Bool {
         switch self {
         case .vless, .trojan, .hysteria2: true
-        case .amneziawg, .wireguard, .openvpn: false
+        case .amneziawg, .wireguard, .openvpn, .openconnect: false
         }
     }
 
@@ -37,6 +39,7 @@ public enum TunnelKind: String, Codable, Sendable {
     /// Xray-based tunnels are a share link.
     public static func detect(_ text: String) -> TunnelKind {
         if let kind = ProxyLink.kind(of: text) { return kind }
+        if OpenConnectConfig.looksLikeProfile(text) { return .openconnect }
         let lowered = text.lowercased()
         if lowered.range(of: #"(^|\n)\s*\[interface\]"#, options: .regularExpression) != nil {
             if let config = try? TunnelConfig.parse(text), !config.usesAmneziaObfuscation { return .wireguard }

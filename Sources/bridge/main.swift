@@ -16,6 +16,10 @@ USAGE
   bridge check <name | file>                 Validate a config and show what will be applied
   bridge remove <name>                       Delete a saved tunnel (and its saved passwords)
   bridge forget <name>                       Delete saved passwords of a tunnel
+  bridge login <name | file>                 Log in to an OpenConnect server without connecting
+  bridge add-openconnect <server> [--protocol anyconnect|fortinet|gp|nc|pulse|f5|array]
+                         [--user U] [--group G] [--name N]
+                                             Add an OpenConnect server (Cisco, Fortinet, GlobalProtect…)
 
   bridge profile import <file | happ://…>    Import a routing profile (routing.json) and its geo files
   bridge profile list                        Imported routing profiles and the tunnels using them
@@ -83,6 +87,62 @@ func promptSecret(_ text: String) -> String {
 func askYesNo(_ text: String) -> Bool {
     let answer = prompt("\(text) [Y/n] ").lowercased()
     return answer.isEmpty || answer.hasPrefix("y")
+}
+
+/// OpenConnect login in the terminal: forms, server certificates, browser SSO.
+final class TerminalOpenConnectUI: OpenConnectLoginUI {
+    func fill(_ form: OpenConnectForm, tunnel: String) -> (values: [String: String], remember: Bool)? {
+        for text in [form.banner, form.message] { if let text, !text.isEmpty { print(text) } }
+        if let error = form.error, !error.isEmpty { print("! \(error)") }
+        var values: [String: String] = [:]
+        for field in form.fields where field.isVisible {
+            switch field.kind {
+            case .select:
+                for (i, option) in field.options.enumerated() {
+                    print("  \(i + 1). \(option.label)\(option.name == field.value ? " (current)" : "")")
+                }
+                let answer = prompt("\(field.label) [1-\(field.options.count)]: ")
+                if let i = Int(answer), field.options.indices.contains(i - 1) {
+                    values[field.name] = field.options[i - 1].name
+                } else if let current = field.value {
+                    values[field.name] = current
+                } else {
+                    return nil
+                }
+            case .password, .token:
+                values[field.name] = promptSecret("\(field.label): ")
+            default:
+                let answer = prompt("\(field.label)\(field.value.map { " [\($0)]" } ?? ""): ")
+                values[field.name] = answer.isEmpty ? (field.value ?? "") : answer
+            }
+        }
+        let remember = form.fields.contains(where: \.isPassword) && askYesNo("Save the password in Keychain?")
+        return (values, remember)
+    }
+
+    func trust(tunnel: String, server: String, fingerprint: String, reason: String, details: String?) -> Bool {
+        print("The certificate of \(server) is not trusted: \(reason)")
+        print("  \(fingerprint)")
+        print("Pin it in the profile to skip this question: ServerCert = \(fingerprint)")
+        let answer = prompt("Connect anyway? [y/N] ").lowercased()
+        return answer.hasPrefix("y")
+    }
+
+    func openBrowser(_ url: URL) {
+        print("Opening the sign-in page in your browser…")
+        let open = Process()
+        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        open.arguments = [url.absoluteString]
+        try? open.run()
+    }
+
+    func startWebLogin(tunnel: String, url: URL, onPage: @escaping @Sendable (OpenConnectWebPage) -> Void,
+                       onCancel: @escaping @Sendable () -> Void) {
+        print("This server signs in through a web page (SSO). Connect '\(tunnel)' from the Bridge app instead.")
+        onCancel()
+    }
+
+    func finishWebLogin() {}
 }
 
 func ask(_ secret: SecretPrompt) -> SecretAnswer? {
@@ -169,6 +229,15 @@ func describe(_ loaded: TunnelLibrary.Loaded) throws {
         if config.hasEncryptedPrivateKey { print("key:        passphrase-protected") }
         let prepared = try config.prepared(tunnel: "check", managementSocket: "/dev/null", eventCommand: "true")
         for warning in prepared.warnings { print("note: \(warning)") }
+    case .openconnect:
+        let config = try OpenConnectConfig.parse(loaded.text)
+        print("server:     \(config.url)")
+        print("type:       \(config.vpnProtocol.displayName)")
+        if let user = config.username { print("username:   \(user)") }
+        if let group = config.group { print("group:      \(group)") }
+        if let pin = config.serverCert { print("servercert: \(pin)") }
+        if config.certificate != nil { print("client cert: embedded") }
+        print("routing:    as the server pushes it (split includes / excludes, DNS)")
     case .vless, .trojan, .hysteria2:
         let link = try ProxyLink.parse(loaded.text)
         print("server:     \(link.endpoint)")
@@ -209,6 +278,30 @@ func run() throws {
         for tunnel in saved {
             print("Saved '\(tunnel.name)' (\(tunnel.kind.displayName)). Connect with: bridge up \(tunnel.name)")
         }
+
+    case "login":
+        guard let reference = arguments.first else { throw CLIError("Usage: bridge login <name | file>") }
+        let (name, loaded) = try resolve(reference, nameOverride: nil)
+        guard loaded.kind == .openconnect else { throw CLIError("'\(name)' is not an OpenConnect server") }
+        let (session, remembered) = try OpenConnectLogin.run(config: try OpenConnectConfig.parse(loaded.text),
+                                                             tunnel: name, ui: TerminalOpenConnectUI())
+        if let remembered {
+            try? Keychain.saveCredentials(username: remembered.username, password: remembered.password, for: name)
+        }
+        print("Logged in to '\(name)'. Server certificate: \(session.fingerprint)")
+
+    case "add-openconnect":
+        let proto = try takeOption("--protocol") ?? "anyconnect"
+        let user = try takeOption("--user"), group = try takeOption("--group"), name = try takeOption("--name")
+        guard let server = arguments.first else { throw CLIError("Usage: bridge add-openconnect <server> [options]") }
+        guard let vpnProtocol = OpenConnectConfig.VPNProtocol(rawValue: proto) else {
+            throw CLIError("Unknown protocol '\(proto)'")
+        }
+        var config = OpenConnectConfig(vpnProtocol: vpnProtocol, server: server)
+        config.username = user
+        config.group = group
+        let saved = try TunnelLibrary.addOpenConnect(config, name: name)
+        print("Saved '\(saved.name)' (\(vpnProtocol.displayName)). Connect with: bridge up \(saved.name)")
 
     case "profile":
         guard let sub = arguments.first else { throw CLIError("Usage: bridge profile import | list | use | update | remove") }
@@ -279,7 +372,7 @@ func run() throws {
         guard TunnelName.isValid(name) else { throw CLIError("'\(name)' is not a valid tunnel name") }
         print("Connecting '\(name)' (\(loaded.kind.displayName))…")
         var status = try Connector.connect(name: name, text: loaded.text, kind: loaded.kind,
-                                           embedded: loaded.embedded, ask: ask)
+                                           embedded: loaded.embedded, openConnectUI: TerminalOpenConnectUI(), ask: ask)
         let deadline = Date().addingTimeInterval(6)
         while !status.connected && Date() < deadline {
             usleep(500_000)

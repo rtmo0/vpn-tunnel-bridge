@@ -27,6 +27,9 @@ fi
 if [ ! -x "$ROOT/build/backend/openvpn" ]; then
   echo "NOTE: build/backend/openvpn not found; building without OpenVPN. Run scripts/build-openvpn.sh to add it."
 fi
+if [ ! -x "$ROOT/build/backend/openconnect" ]; then
+  echo "NOTE: build/backend/openconnect not found; building without OpenConnect. Run scripts/build-openconnect.sh to add it."
+fi
 if [ ! -x "$ROOT/build/backend/xray" ]; then
   echo "NOTE: build/backend/xray not found; building without VLESS. Run scripts/build-xray.sh to add it."
 fi
@@ -43,6 +46,9 @@ mkdir -p "$BIN"
 cp "$PRODUCTS/bridge" "$PRODUCTS/bridge-helper" "$ROOT/build/backend/amneziawg-go" "$BIN/"
 [ -x "$ROOT/build/backend/openvpn" ] && cp "$ROOT/build/backend/openvpn" "$BIN/"
 [ -x "$ROOT/build/backend/xray" ] && cp "$ROOT/build/backend/xray" "$BIN/"
+for f in openconnect bridge-openconnect-auth; do
+  [ -x "$ROOT/build/backend/$f" ] && cp "$ROOT/build/backend/$f" "$BIN/"
+done
 for f in "$BIN"/*; do codesign --force --sign - "$f" 2>/dev/null; done
 
 echo "==> Assembling Bridge.app"

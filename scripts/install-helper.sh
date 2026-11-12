@@ -6,7 +6,8 @@
 #   install-helper.sh <source-dir> [version]   install / upgrade (version: app that installs it)
 #   install-helper.sh --uninstall
 #
-# <source-dir> must contain bridge-helper and amneziawg-go; openvpn, xray and bridge (CLI) are optional.
+# <source-dir> must contain bridge-helper and amneziawg-go; openvpn, xray, openconnect (with
+# bridge-openconnect-auth) and bridge (CLI) are optional.
 
 set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
@@ -59,6 +60,13 @@ if [ -f "$SRC/xray" ]; then
 else
   rm -f "$DEST/xray"
 fi
+for f in openconnect bridge-openconnect-auth; do
+  if [ -f "$SRC/$f" ]; then
+    install -o root -g wheel -m 755 "$SRC/$f" "$DEST/$f"
+  else
+    rm -f "$DEST/$f"
+  fi
+done
 if [ -n "${2:-}" ]; then
   printf '%s\n' "$2" > "$DEST/version"
   chown root:wheel "$DEST/version"

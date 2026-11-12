@@ -45,6 +45,30 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event"
     exit(0)
 }
 
+// `bridge-helper openconnect-event` is OpenConnect's vpnc-script (run as root): it
+// forwards the reason and the server-assigned settings to the daemon and waits,
+// because OpenConnect expects the interface configured when the script returns.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "openconnect-event" {
+    let env = ProcessInfo.processInfo.environment
+    let wanted = env.filter { key, _ in
+        key.hasPrefix("INTERNAL_IP") || key.hasPrefix("CISCO_") || ["reason", "TUNDEV", "VPNGATEWAY", "VPNPID"].contains(key)
+    }
+    let request = HelperRequest(command: .openconnectEvent, name: env["BRIDGE_TUNNEL"], event: env["reason"],
+                                environment: wanted)
+    var ok = true
+    if let fd = try? UnixSocket.connect(path: HelperProtocol.socketPath, timeout: 30),
+       let data = try? JSONEncoder.bridge.encode(request) {
+        try? UnixSocket.writeAll(fd, String(decoding: data, as: UTF8.self) + "\n")
+        if let line = try? UnixSocket.read(fd, until: "\n"),
+           let response = try? JSONDecoder.bridge.decode(HelperResponse.self, from: Data(line.utf8)) {
+            ok = response.ok
+        }
+        close(fd)
+    }
+    // A failed "connect" makes OpenConnect give up instead of running unconfigured.
+    exit(ok || env["reason"] != "connect" ? 0 : 1)
+}
+
 guard getuid() == 0 else {
     FileHandle.standardError.write("bridge-helper must run as root (it is started by launchd).\n".data(using: .utf8)!)
     exit(1)
@@ -62,6 +86,7 @@ do {
     log("! \(error)")
 }
 log(OpenVPNBackend.isAvailable ? "OpenVPN backend: \(OpenVPNBackend.executablePath)" : "OpenVPN backend not installed")
+log(OpenConnectBackend.isAvailable ? "OpenConnect backend: \(OpenConnectBackend.executablePath)" : "OpenConnect backend not installed")
 log(XrayBackend.isAvailable ? "Xray backend (VLESS, Trojan, Hysteria 2): \(XrayBackend.executablePath)" : "Xray backend not installed")
 
 let manager = TunnelManager()
@@ -69,6 +94,7 @@ manager.queue.sync { manager.firewall.recover() }
 let networkMonitor = NetworkMonitor { manager.queue.async { manager.networkChanged() } }
 // OpenVPN tunnels learn their interface and routes asynchronously (route-up hook).
 OpenVPNRegistry.shared.onRoutesChanged = { manager.queue.async { manager.updateFirewall() } }
+OpenConnectRegistry.shared.onChanged = { manager.queue.async { manager.openConnectChanged() } }
 let installedBuild = (try? String(contentsOfFile: URL(fileURLWithPath: AmneziaBackend.helperExecutablePath)
     .deletingLastPathComponent().appendingPathComponent("version").path, encoding: .utf8))?
     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,6 +150,15 @@ func serve(_ fd: Int32) {
         var response = HelperResponse(ok: true, capabilities: manager.capabilities)
         response.helperBuild = installedBuild
         reply(response)
+        return
+    }
+    if request.command == .openconnectEvent {
+        guard uid == 0, let reason = request.event else {
+            reply(.failure("Not allowed"))
+            return
+        }
+        reply(OpenConnectRegistry.shared.handleEvent(tunnel: request.name, reason: reason,
+                                                     environment: request.environment ?? [:]))
         return
     }
     if request.command == .openvpnEvent {

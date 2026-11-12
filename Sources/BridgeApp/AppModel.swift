@@ -146,11 +146,11 @@ final class AppModel: ObservableObject {
                 if kind == .openvpn && !canOpenVPN {
                     throw ClientError("The installed helper has no OpenVPN. Choose “Update Helper…” in the Bridge menu.")
                 }
-                if kind.usesXray && !available.contains(kind) {
+                if (kind.usesXray || kind == .openconnect) && !available.contains(kind) {
                     throw ClientError("The installed helper has no \(kind.displayName) support. "
                         + "Choose “Update Helper…” in the Bridge menu.")
                 }
-                _ = try Connector.connect(name: name, text: text, kind: kind) { prompt in
+                _ = try Connector.connect(name: name, text: text, kind: kind, openConnectUI: AppOpenConnectUI()) { prompt in
                     DispatchQueue.main.sync { Prompter.ask(prompt) }
                 }
             } catch let error as ClientError where error.description == "Cancelled" {
@@ -252,6 +252,13 @@ final class AppModel: ObservableObject {
                         "Copy one or more vless://, trojan:// or hysteria2:// links (or a subscription) first.")
         }
         refresh()
+    }
+
+    /// Asks for an OpenConnect server and adds it to the library.
+    func addOpenConnectServer() {
+        guard let name = AppOpenConnectUI.addServer() else { return }
+        refresh()
+        ManageWindow.show(model: self, select: name)
     }
 
     // MARK: Routing profiles

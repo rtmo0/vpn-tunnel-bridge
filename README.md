@@ -8,12 +8,13 @@
 ![AmneziaWG](https://img.shields.io/badge/AmneziaWG-1.0%20%7C%201.5%20%7C%202.0-2E7D32)
 ![WireGuard](https://img.shields.io/badge/WireGuard-88171A?logo=wireguard&logoColor=white)
 ![OpenVPN](https://img.shields.io/badge/OpenVPN-2.7-EA7E20?logo=openvpn&logoColor=white)
+![OpenConnect](https://img.shields.io/badge/OpenConnect-AnyConnect%20%7C%20Fortinet%20%7C%20GlobalProtect-1565C0)
 ![VLESS](https://img.shields.io/badge/VLESS-REALITY%20%7C%20Vision%20%7C%20XHTTP-6A1B9A)
 ![Trojan](https://img.shields.io/badge/Trojan-TLS%20%7C%20REALITY-37474F)
 ![Hysteria 2](https://img.shields.io/badge/Hysteria%202-salamander%20%7C%20port%20hopping-0277BD)
 ![Routing profiles](https://img.shields.io/badge/routing-geosite%20%7C%20geoip-00897B)
 
-**Tunnel Bridge** is a free, open-source VPN client for macOS that lives in the menu bar. It connects **AmneziaWG**, **WireGuard**, **OpenVPN**, **VLESS**, **Trojan** and **Hysteria 2** tunnels from ordinary `.conf` and `.ovpn` files or share links, and it can keep several of them up at once.
+**Tunnel Bridge** is a free, open-source VPN client for macOS that lives in the menu bar. It connects **AmneziaWG**, **WireGuard**, **OpenVPN**, **OpenConnect** (Cisco AnyConnect, Fortinet, GlobalProtect, Pulse / Ivanti, F5, Array), **VLESS**, **Trojan** and **Hysteria 2** tunnels from ordinary `.conf` and `.ovpn` files, OpenConnect servers or share links, and it can keep several of them up at once.
 
 Bridge started as a replacement for clients that silently drop newer AmneziaWG settings. It passes every parameter of AmneziaWG 1.0, 1.5 and 2.0 to the backend, and it refuses a config with a key it doesn't understand instead of quietly ignoring it.
 
@@ -27,6 +28,7 @@ It needs no Network Extension, no Apple Developer account and no App Store. A sm
 | ✅ | **AmneziaWG** with every parameter: `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` (including ranges), `I1`–`I5`, `HeaderProtectionKey`, `ContentPaddingAddition`, timing options |
 | ✅ | **WireGuard** configs as they are |
 | ✅ | **OpenVPN 2.7**: username and password, certificates, passphrase-protected keys, one-time codes (static challenge), DNS pushed by the server |
+| ✅ | **OpenConnect 9.21**: Cisco AnyConnect / ocserv, Fortinet, GlobalProtect, Pulse / Ivanti, F5, Array. Login forms with groups, one-time codes and client certificates; SSO (SAML / OIDC) in a built-in browser window or the default browser; split routes and split DNS pushed by the server |
 | ✅ | **VLESS** (Xray-core) from `vless://` links or subscriptions: REALITY, XTLS Vision, XHTTP, WebSocket, gRPC, HTTPUpgrade, TLS with pinned certificates. IPv6 goes through the tunnel when the server has it |
 | ✅ | **Trojan** from `trojan://` links, with the same transports and TLS/REALITY options |
 | ✅ | **Hysteria 2** from `hysteria2://` / `hy2://` links: salamander obfuscation, port hopping (`host:443,20000-30000`), pinned certificates, Brutal bandwidth (`upmbps`) |
@@ -49,7 +51,7 @@ It needs no Network Extension, no Apple Developer account and no App Store. A sm
 
 - macOS 14 Sonoma or later.
 - An administrator account on the Mac (needed once, to install the network helper).
-- **Apple Silicon** (M1 or later) for all protocols. On **Intel** Macs, everything except OpenVPN works; OpenVPN is currently built for Apple Silicon only.
+- **Apple Silicon** (M1 or later) for all protocols. On **Intel** Macs, everything except OpenVPN and OpenConnect works; OpenVPN is currently built for Apple Silicon only.
 
 ### 1. Download
 
@@ -163,6 +165,25 @@ These run through the bundled Xray-core.
 - After connecting, Bridge checks whether the server reaches IPv6. If it does, IPv6 goes through the tunnel too; if not, IPv6 stays blocked so it can't leak around the tunnel.
 - Links that turn certificate checks off (`allowInsecure=1`, `insecure=1`) are refused: pin a self-signed certificate with `pcs=<sha256>` (Hysteria: `pinSHA256=`) instead. Unknown link parameters are refused too, never ignored.
 
+### OpenConnect (Cisco AnyConnect, Fortinet, GlobalProtect…)
+
+- Add a server with **Add OpenConnect Server…** in the menu: type, server address (`vpn.example.com` or `vpn.example.com/group`), and optionally username and group. Or import a `.openconnect` profile file.
+- When you connect, Bridge logs in as you: it shows the server's own forms (group, username, password, one-time code), and opens a sign-in window for SSO (SAML / OIDC, e.g. Okta or Microsoft Entra). Only the resulting session goes to the helper.
+- Tick **Remember in Keychain** and the username and password are filled in next time; one-time codes are always asked.
+- A server with a self-signed certificate asks once; **Always trust** saves its fingerprint in the profile (`ServerCert = pin-sha256:…`).
+- The server's routes and DNS are used as pushed (split include / exclude, split DNS for its domains). The Routing and DNS settings override them like for other tunnels.
+
+A `.openconnect` profile:
+
+```ini
+Protocol = anyconnect        # fortinet, gp, nc, pulse, f5, array
+Server = vpn.example.com/engineering
+Username = alice
+Group = Employees
+ServerCert = pin-sha256:…    # optional
+# Certificate = me.pem / Key = me.key are embedded on import, like .ovpn files
+```
+
 ### Routing profiles
 
 A routing profile decides per site and network what goes through the tunnel, what goes direct and what is blocked. Bridge reads the format Happ uses (`routing.json`, or a `happ://routing/add/…` link), for example [RoscomVPN](https://github.com/hydraponique/roscomvpn-routing): Russian sites and networks direct, everything else through the VPN, ads and trackers blocked.
@@ -211,6 +232,8 @@ Installing the helper also puts `bridge` in `/usr/local/bin`:
 ```bash
 bridge import my-server.conf      # add to the library
 bridge import 'vless://…'         # add a VLESS / Trojan / Hysteria 2 link (or a file / subscription)
+bridge add-openconnect vpn.example.com --protocol anyconnect --user alice
+bridge login my-server            # OpenConnect: check the login without connecting
 bridge list                       # saved tunnels and their state
 bridge up my-server               # connect
 bridge status                     # handshake, traffic, interface
@@ -229,6 +252,8 @@ bridge-helper (root, launchd)
   │                         split default route (0/1 + 128/1), pinned server route
   ├─ openvpn                driven via its management socket; Bridge answers password
   │                         prompts and is its route-up and dns-updown hook
+  ├─ openconnect            started with the session cookie from the app's login
+  │                         (bridge-openconnect-auth, as the user); Bridge is its vpnc-script
   ├─ xray run -c …          VLESS / Trojan / Hysteria 2: Xray creates the utun, Bridge writes its config from
   │                         the link and sets routes, DNS and the pinned server route
   ├─ DNS                    System Configuration dynamic store
@@ -256,6 +281,7 @@ cd vpn-tunnel-bridge
 brew install go openssl@3 lz4 lzo pkgconf
 scripts/build-openvpn.sh   # OpenVPN with static OpenSSL, LZ4 and LZO (optional)
 scripts/build-xray.sh      # Xray-core for VLESS, Trojan and Hysteria 2 (optional)
+scripts/build-openconnect.sh  # OpenConnect + its login helper, static OpenSSL and LZ4 (optional)
 scripts/build.sh           # amneziawg-go, CLI, helper → build/Bridge.app
 open build/Bridge.app
 ```
@@ -282,4 +308,4 @@ Bridge is free and open source. If it keeps you connected, you can support devel
 
 MIT, see [LICENSE](LICENSE). Copyright © 2026 Andrey Samarin.
 
-Bundled backends keep their own licenses: [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (MIT), [OpenVPN](https://github.com/OpenVPN/openvpn) (GPL-2.0) and [Xray-core](https://github.com/XTLS/Xray-core) (MPL-2.0), each built from unmodified upstream source.
+Bundled backends keep their own licenses: [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (MIT), [OpenVPN](https://github.com/OpenVPN/openvpn) (GPL-2.0), [OpenConnect](https://www.infradead.org/openconnect/) (LGPL-2.1) and [Xray-core](https://github.com/XTLS/Xray-core) (MPL-2.0), each built from unmodified upstream source.

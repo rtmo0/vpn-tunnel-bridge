@@ -55,6 +55,7 @@ final class ActiveTunnel {
         if let wireGuard { return wireGuard.isFullTunnel }
         if let proxyRouting { return proxyRouting.isFullTunnel }
         if let backend = backend as? OpenVPNBackend { return backend.fullTunnel || (openVPN?.redirectsGateway ?? false) }
+        if let backend = backend as? OpenConnectBackend { return backend.fullTunnel }
         return openVPN?.redirectsGateway ?? false
     }
 }
@@ -76,6 +77,7 @@ final class TunnelManager {
         var kinds: [TunnelKind] = [.amneziawg, .wireguard]
         if OpenVPNBackend.isAvailable { kinds.append(.openvpn) }
         if XrayBackend.isAvailable { kinds += [.vless, .trojan, .hysteria2] }
+        if OpenConnectBackend.isAvailable { kinds.append(.openconnect) }
         return kinds
     }
 
@@ -119,8 +121,8 @@ final class TunnelManager {
                 downAll()
                 updateFirewall()
                 return HelperResponse(ok: true)
-            case .openvpnEvent:
-                return .failure("openvpnEvent is handled outside the manager queue")
+            case .openvpnEvent, .openconnectEvent:
+                return .failure("Hook events are handled outside the manager queue")
             }
         } catch let error as CodedError {
             return .failure(error.message, code: error.code, detail: error.detail)
@@ -153,6 +155,13 @@ final class TunnelManager {
             }
             return try upOpenVPN(name: name, config: try OpenVPNConfig.parse(configText).applying(settings),
                                  secrets: secrets, settings: settings)
+        case .openconnect:
+            guard OpenConnectBackend.isAvailable else {
+                throw CodedError(code: .unsupported, message: "OpenConnect is not installed with this Bridge build",
+                                 detail: nil)
+            }
+            return try upOpenConnect(name: name, config: try OpenConnectConfig.parse(configText), secrets: secrets,
+                                     settings: settings)
         case .vless, .trojan, .hysteria2:
             guard XrayBackend.isAvailable else {
                 throw CodedError(code: .unsupported,
@@ -423,6 +432,53 @@ final class TunnelManager {
         updateFirewall()
     }
 
+    private func upOpenConnect(name: String, config: OpenConnectConfig, secrets: TunnelSecrets,
+                               settings: TunnelSettings) throws -> TunnelStatus {
+        // Whether it takes all traffic is only known once the server answers; check what we can.
+        if settings.routing == .allTraffic || settings.routing == .config {
+            if let other = tunnels.values.first(where: { $0.routesAllTraffic }) {
+                if settings.routing == .allTraffic {
+                    throw HelperError("'\(other.name)' already routes all traffic. Disconnect it first.")
+                }
+            }
+        }
+        log("up '\(name)' (OpenConnect \(config.vpnProtocol.rawValue), \(config.host))")
+        let tunnel = ActiveTunnel(name: name, kind: .openconnect, wireGuard: nil, openVPN: nil,
+                                  backendPath: OpenConnectBackend.executablePath)
+        tunnel.warnings = []
+        tunnels[name] = tunnel
+        do {
+            tunnel.serverIPs = Resolver.resolveAll(config.host).filter { !$0.isIPv6 }.map { "\($0)" }
+            ensureServerPins()
+            let backend = try OpenConnectBackend.start(tunnel: name, config: config, secrets: secrets,
+                                                       settings: settings) { [weak self] pid in
+                self?.queue.async { self?.backendExited(name: name, pid: pid) }
+            }
+            tunnel.backend = backend
+            if backend.fullTunnel, let other = tunnels.values.first(where: { $0 !== tunnel && $0.routesAllTraffic }) {
+                throw HelperError("'\(other.name)' already routes all traffic, and the server of '\(name)' "
+                    + "sends all traffic through the VPN. Disconnect '\(other.name)' first.")
+            }
+            ensureServerPins()
+            saveState()
+            log("up '\(name)' done on \(backend.interface)")
+            lastUplink = Routes.uplink(excluding: ourInterfaces)
+            return status(of: tunnel)
+        } catch {
+            log("up '\(name)' failed: \(error)")
+            teardown(tunnel)
+            tunnels[name] = nil
+            saveState()
+            throw error
+        }
+    }
+
+    /// An OpenConnect tunnel (re)configured itself: follow with the firewall and saved state.
+    func openConnectChanged() {
+        saveState()
+        updateFirewall()
+    }
+
     private func defaultMTU(uplink: String?) -> Int {
         let base = uplink.flatMap(Interface.mtu(of:))
             ?? Routes.lookup("default", ipv6: false)?.interface.flatMap(Interface.mtu(of:))
@@ -480,6 +536,9 @@ final class TunnelManager {
 
     private func servers(of tunnel: ActiveTunnel) -> [String] {
         var servers = tunnel.serverIPs
+        if let backend = tunnel.backend as? OpenConnectBackend, let gateway = backend.gateway, !servers.contains(gateway) {
+            servers.append(gateway)
+        }
         if let backend = tunnel.backend as? OpenVPNBackend, let remote = backend.snapshot.remote,
            let host = remote.split(separator: ":").first, IPAddress(String(host)) != nil {
             servers.append(String(host))
@@ -501,6 +560,8 @@ final class TunnelManager {
                 let hasIPv6: Bool
                 if let config = tunnel.wireGuard {
                     hasIPv6 = config.addresses.contains(where: \.isIPv6)
+                } else if let backend = tunnel.backend as? OpenConnectBackend {
+                    hasIPv6 = backend.hasIPv6
                 } else if tunnel.proxy != nil {
                     hasIPv6 = tunnel.ipv6Active
                 } else if let backend = tunnel.backend as? OpenVPNBackend {
@@ -554,6 +615,10 @@ final class TunnelManager {
         for tunnel in tunnels.values {
             guard let backend = tunnel.backend else { continue }
             if let vpn = backend as? OpenVPNBackend {
+                vpn.reconnect()
+                continue
+            }
+            if let vpn = backend as? OpenConnectBackend {
                 vpn.reconnect()
                 continue
             }
@@ -655,6 +720,17 @@ final class TunnelManager {
                 lastHandshake: nil, rxBytes: s.rx, txBytes: s.tx, peers: [],
                 warnings: tunnel.warnings + [backend.dnsWarning].compactMap { $0 })
         }
+        if let backend = tunnel.backend as? OpenConnectBackend {
+            let network = backend.network
+            let counters = network.flatMap { Interface.counters($0.interface) } ?? (0, 0)
+            return TunnelStatus(
+                name: tunnel.name, kind: .openconnect, interface: backend.interface, pid: backend.pid,
+                startedAt: tunnel.startedAt, connected: backend.state == "Connected", state: backend.state,
+                server: backend.config.host,
+                addresses: [network?.ipv4, network?.ipv6?.description].compactMap { $0 },
+                dnsServers: dns.servers(for: tunnel.name), fullTunnel: backend.fullTunnel, lastHandshake: nil,
+                rxBytes: counters.rx, txBytes: counters.tx, peers: [], warnings: tunnel.warnings + backend.warnings)
+        }
         if let backend = tunnel.backend as? XrayBackend, let link = tunnel.proxy, let routing = tunnel.proxyRouting {
             let health = backend.health
             let counters = Interface.counters(backend.interface) ?? (0, 0)
@@ -688,7 +764,8 @@ final class TunnelManager {
     private func saveState() {
         let entries = tunnels.values.map {
             PersistedTunnel(name: $0.name, pid: $0.backend?.pid ?? 0, backendPath: $0.backendPath,
-                            interface: $0.backend?.interface ?? "", routes: $0.routes)
+                            interface: $0.backend?.interface ?? "",
+                            routes: $0.routes + (($0.backend as? OpenConnectBackend)?.routes ?? []))
         }
         do {
             let data = try JSONEncoder.bridge.encode(entries)

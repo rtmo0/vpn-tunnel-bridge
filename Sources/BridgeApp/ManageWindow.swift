@@ -108,6 +108,7 @@ struct ManageView: View {
             } actions: {
                 Button("Import Tunnels…") { model.importConfigs() }
                 Button("Paste Links") { model.importFromClipboard() }
+                Button("Add OpenConnect Server…") { model.addOpenConnectServer() }
             }
         }
     }
@@ -188,6 +189,20 @@ struct ConfigSummary {
             if c.staticChallenge != nil { login.append("one-time code") }
             if c.hasEncryptedPrivateKey { login.append("key passphrase") }
             self.login = login.joined(separator: " + ")
+        case .openconnect:
+            guard let c = try? OpenConnectConfig.parse(text) else { return }
+            servers = c.url
+            routes = "Pushed by the server"
+            dns = "Pushed by the server"
+            needsLogin = true
+            var p: [(name: String, value: String)] = [("Type", c.vpnProtocol.displayName)]
+            if let user = c.username { p.append(("Username", user)) }
+            if let group = c.group { p.append(("Group", group)) }
+            if c.serverCert != nil { p.append(("Pinned certificate", "yes")) }
+            if c.certificate != nil { p.append(("Client certificate", "embedded")) }
+            if c.disableDTLS { p.append(("DTLS", "off")) }
+            parameters = p
+            login = "Asked when connecting (forms, one-time codes, SSO)"
         case .vless, .trojan, .hysteria2:
             guard let link = try? ProxyLink.parse(text) else { return }
             servers = link.endpoint
@@ -339,7 +354,7 @@ struct TunnelDetail: View {
             if !status.interface.isEmpty { LabeledContent("Interface", value: status.interface) }
             if !status.addresses.isEmpty { LabeledContent("Addresses", value: status.addresses.joined(separator: ", ")) }
             if !status.dnsServers.isEmpty { LabeledContent("DNS", value: status.dnsServers.joined(separator: ", ")) }
-            if status.kind != .openvpn {
+            if status.kind != .openvpn && status.kind != .openconnect {
                 LabeledContent(status.kind.usesXray ? "Last check" : "Last handshake",
                                value: status.lastHandshake.map { ago($0) } ?? "Never")
             }
@@ -357,16 +372,16 @@ struct TunnelDetail: View {
                 if !s.addresses.isEmpty { LabeledContent("Addresses", value: s.addresses) }
                 if !s.dns.isEmpty { LabeledContent("DNS", value: s.dns) }
                 if !s.routes.isEmpty { LabeledContent("Routes", value: s.routes) }
-                if s.kind != .openvpn && !s.kind.usesXray { LabeledContent("MTU", value: s.mtu) }
+                if s.kind != .openvpn && s.kind != .openconnect && !s.kind.usesXray { LabeledContent("MTU", value: s.mtu) }
                 if !s.parameters.isEmpty {
-                    DisclosureGroup(s.kind.usesXray ? "\(s.kind.displayName) settings (\(s.parameters.count))"
+                    DisclosureGroup(s.kind.usesXray || s.kind == .openconnect ? "\(s.kind.displayName) settings (\(s.parameters.count))"
                                     : "AmneziaWG parameters (\(s.parameters.count))") {
                         ForEach(s.parameters, id: \.name) { p in
                             LabeledContent(p.name) { Text(p.value).font(.callout.monospaced()) }
                         }
                     }
                 }
-                if s.kind == .openvpn { LabeledContent("Authentication", value: s.login) }
+                if s.kind == .openvpn || s.kind == .openconnect { LabeledContent("Authentication", value: s.login) }
             }
         } header: {
             HStack {
@@ -473,6 +488,7 @@ struct TunnelDetail: View {
         case .config:
             switch summary?.kind {
             case .openvpn: base = "Uses the routes the OpenVPN server pushes."
+            case .openconnect: base = "Uses the routes the OpenConnect server pushes (split include / exclude)."
             case .vless, .trojan, .hysteria2: base = "All traffic. IPv6 goes through the tunnel when the server can reach IPv6, otherwise it is blocked."
             default: base = "Uses AllowedIPs from the configuration."
             }
