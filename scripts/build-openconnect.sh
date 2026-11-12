@@ -54,8 +54,13 @@ rm -rf "$STATIC"
 mkdir -p "$STATIC"
 cp "$SSL/lib/libssl.a" "$SSL/lib/libcrypto.a" "$LZ4/lib/liblz4.a" "$STATIC/"
 
+# pkg-config sees nothing: every dependency is passed explicitly below, and whatever
+# else Homebrew has installed (e.g. p11-kit on GitHub runners) must not be linked in.
+NO_PKGCONFIG="$SRC/empty-pkgconfig"
+mkdir -p "$NO_PKGCONFIG"
+
 echo "==> Configuring"
-./configure \
+PKG_CONFIG_LIBDIR="$NO_PKGCONFIG" PKG_CONFIG_PATH="" ./configure \
   --disable-dependency-tracking \
   --disable-shared --enable-static \
   --disable-nls --disable-docs \
