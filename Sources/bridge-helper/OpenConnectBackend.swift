@@ -77,7 +77,13 @@ final class OpenConnectBackend: TunnelBackend {
         if let os = config.reportedOS { arguments += ["--os", os] }
         if config.disableDTLS { arguments.append("--no-dtls") }
         if let resolve = secrets.resolve, resolve.contains(":") { arguments += ["--resolve", resolve] }
-        arguments.append(secrets.connectURL ?? config.url)
+        // The URL comes from the client. It must be an https:// URL, and "--" ends the options so
+        // nothing in it can become one (a second --script would run as root).
+        let url = secrets.connectURL ?? config.url
+        guard let parsed = URL(string: url), parsed.scheme?.lowercased() == "https", parsed.host?.isEmpty == false else {
+            throw HelperError("Invalid server URL for OpenConnect")
+        }
+        arguments += ["--", url]
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)

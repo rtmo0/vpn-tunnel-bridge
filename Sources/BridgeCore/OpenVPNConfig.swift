@@ -228,7 +228,13 @@ public struct OpenVPNConfig: Equatable, Sendable {
         // Windows-only options found in many provider configs.
         "block-outside-dns", "register-dns", "dhcp-release", "dhcp-renew", "ip-win32", "route-method",
         "tap-sleep", "windows-driver", "win-sys", "allow-nonadmin", "service",
+        // OpenVPN runs as root: nothing that loads code or writes files where the config says.
+        "providers", "engine", "pkcs11-providers", "replay-persist", "tls-export-cert", "tls-crypt-v2-verify",
+        "auth-gen-token-secret", "client-config-dir", "ifconfig-pool-persist",
     ]
+
+    /// Server-side modes. Bridge is a client; these also unlock server-only hooks.
+    static let serverDirectives: Set<String> = ["server", "server-bridge", "mode", "tls-server"]
 
     public struct Prepared: Sendable {
         public var text: String
@@ -254,10 +260,25 @@ public struct OpenVPNConfig: Equatable, Sendable {
             if name == "dev-type", directive.args.first?.lowercased() == "tap" {
                 throw ConfigError("TAP (layer 2) tunnels are not supported on macOS; only 'dev tun' works")
             }
-            if name == "setenv", directive.args.first == "opt", directive.args.count > 1,
-               Self.strippedDirectives.contains(directive.args[1].lowercased()) {
-                stripped.insert(directive.args[1].lowercased())
+            if name == "setenv" {
+                // `setenv opt <directive>` marks a directive optional: judge the directive itself.
+                // Any other setenv only feeds the environment of the scripts OpenVPN runs, which
+                // are Bridge's own hooks running as root (think DYLD_INSERT_LIBRARIES): drop it.
+                guard directive.args.first?.lowercased() == "opt", directive.args.count > 1 else { continue }
+                let inner = directive.args[1].lowercased()
+                if Self.serverDirectives.contains(inner) {
+                    throw ConfigError("Server configs are not supported; Bridge connects as a client")
+                }
+                if Self.strippedDirectives.contains(inner) || inner.hasPrefix("management-") || inner == "config"
+                    || inner == "setenv" || Self.fileDirectives[inner] != nil {
+                    stripped.insert(inner)
+                    continue
+                }
+                kept.append(directive)
                 continue
+            }
+            if Self.serverDirectives.contains(name) {
+                throw ConfigError("Server configs are not supported; Bridge connects as a client")
             }
             if Self.strippedDirectives.contains(name) || name.hasPrefix("management-") {
                 stripped.insert(name)

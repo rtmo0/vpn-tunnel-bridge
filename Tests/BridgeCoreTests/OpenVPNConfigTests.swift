@@ -103,6 +103,37 @@ abcd
         #expect(throws: ConfigError.self) { try OpenVPNConfig.parse("client\ndev tun\n") }
     }
 
+    @Test func dropsEnvironmentAndCodeLoadingDirectives() throws {
+        let config = try OpenVPNConfig.parse("""
+        client
+        remote a 1194
+        setenv DYLD_INSERT_LIBRARIES /tmp/evil.dylib
+        setenv opt providers /tmp/evil
+        setenv opt block-outside-dns
+        setenv opt tls-cipher DEFAULT
+        providers /tmp/evil
+        engine /tmp/evil
+        replay-persist /etc/sudoers
+        tls-export-cert /tmp
+        """)
+        let lines = try config.prepared(tunnel: "t", managementSocket: "/m", eventCommand: "/e")
+            .text.components(separatedBy: "\n")
+        #expect(!lines.contains { $0.contains("DYLD") || $0.contains("/tmp/evil") || $0.contains("sudoers") })
+        #expect(!lines.contains { $0.hasPrefix("tls-export-cert") || $0.contains("block-outside-dns") })
+        // A harmless optional directive stays, and Bridge's own setenv is still there.
+        #expect(lines.contains("setenv opt tls-cipher DEFAULT"))
+        #expect(lines.contains("setenv BRIDGE_TUNNEL t"))
+    }
+
+    @Test func rejectsServerConfigs() throws {
+        for line in ["server 10.8.0.0 255.255.255.0", "mode server", "tls-server", "setenv opt mode server"] {
+            let config = try OpenVPNConfig.parse("client\nremote a 1194\n\(line)\n")
+            #expect(throws: ConfigError.self) {
+                try config.prepared(tunnel: "t", managementSocket: "/m", eventCommand: "/e")
+            }
+        }
+    }
+
     @Test func inliningReadsReferencedFiles() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

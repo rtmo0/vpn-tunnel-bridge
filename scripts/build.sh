@@ -50,6 +50,9 @@ for f in openconnect bridge-openconnect-auth; do
   [ -x "$ROOT/build/backend/$f" ] && cp "$ROOT/build/backend/$f" "$BIN/"
 done
 for f in "$BIN"/*; do codesign --force --sign - "$f" 2>/dev/null; done
+# Hardened runtime for our own binaries: bridge-helper also runs as root as OpenVPN's and
+# OpenConnect's hook, so dyld must ignore DYLD_* variables in the environment it is given.
+for f in bridge-helper bridge; do codesign --force --options runtime --sign - "$BIN/$f"; done
 
 echo "==> Assembling Bridge.app"
 rm -rf "$APP"
@@ -81,7 +84,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 for f in "$APP/Contents/Resources"/*; do
-  [ -x "$f" ] && [ "${f##*.}" != "sh" ] && codesign --force --sign - "$f" 2>/dev/null
+  [ -x "$f" ] && [ "${f##*.}" != "sh" ] || continue
+  case "$(basename "$f")" in
+    bridge-helper|bridge) codesign --force --options runtime --sign - "$f" ;;
+    *) codesign --force --sign - "$f" 2>/dev/null ;;
+  esac
 done
 codesign --force --sign - "$APP"
 codesign --verify "$APP"
