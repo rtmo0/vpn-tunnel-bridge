@@ -104,9 +104,12 @@ private let splitEnvironment: [String: String] = [
         settings.networks = ["10.20.0.0/16"]
         settings.dnsMode = .custom
         settings.dnsServers = ["9.9.9.9"]
+        settings.splitDNSDomains = ["internal.example"]
         let plan = try #require(OpenConnectNetwork(environment: splitEnvironment)).plan(settings)
         #expect(plan.networks.map(\.description) == ["10.20.0.0/16"])
         #expect(plan.bypass.isEmpty)  // the user chose the routes; server exclusions don't apply
         #expect(plan.dnsServers.map(\.description) == ["9.9.9.9"])
+        #expect(plan.searchDomains == ["internal.example"])
+        #expect(plan.dnsOnlyForDomains)
     }
 }

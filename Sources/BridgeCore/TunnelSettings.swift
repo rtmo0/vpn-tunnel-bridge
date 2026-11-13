@@ -170,6 +170,21 @@ extension OpenVPNConfig {
             for net in TunnelSettings.localNetworks.compactMap(IPNetwork.init) { route(net, viaUplink: true) }
         }
 
+        // A split-DNS override explicitly asks Bridge to use the VPN's resolver for
+        // these domains. Some imported profiles contain a pull-filter that discards
+        // the server-pushed DNS. Remove only filters that match OpenVPN's two DNS
+        // option forms; otherwise dns-updown never reports a server and Bridge cannot
+        // publish the supplemental resolver.
+        if settings.dnsMode == .config && !settings.splitDNSDomains.isEmpty {
+            let dnsOptions = ["dhcp-option dns", "dns server"]
+            out.directives.removeAll { directive in
+                guard directive.name == "pull-filter", directive.args.count >= 2,
+                      ["ignore", "reject"].contains(directive.args[0].lowercased()) else { return false }
+                let pattern = directive.args[1].trimmingCharacters(in: .whitespaces).lowercased()
+                return !pattern.isEmpty && dnsOptions.contains { $0.hasPrefix(pattern) }
+            }
+        }
+
         switch settings.dnsMode {
         case .config: break
         case .custom, .system:

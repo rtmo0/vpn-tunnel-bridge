@@ -135,10 +135,13 @@ private func outbound(_ root: [String: Any]) throws -> [String: Any] {
         s.networks = ["10.0.0.0/8"]
         s.dnsMode = .custom
         s.dnsServers = ["9.9.9.9"]
+        s.splitDNSDomains = ["internal.example"]
         let routing = try ProxyLink.parse(reality).routing(s)
         #expect(!routing.isFullTunnel)
         #expect(routing.networks.map(\.description) == ["10.0.0.0/8"])
         #expect(routing.dnsServers.map(\.description) == ["9.9.9.9"])
+        #expect(routing.dnsSearchDomains == ["internal.example"])
+        #expect(routing.dnsOnlyForDomains)
 
         var local = TunnelSettings()
         local.excludeLocalNetworks = true

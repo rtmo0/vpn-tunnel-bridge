@@ -96,6 +96,34 @@ AllowedIPs = 0.0.0.0/0, ::/0
         #expect(excluded.contains("redirect-gateway def1"))
         #expect(excluded.contains("route 192.0.2.0 255.255.255.0 net_gateway"))
     }
+
+    @Test func splitDNSAllowsServerDNSFilteredByImportedProfile() throws {
+        let base = try OpenVPNConfig.parse("""
+        client
+        remote vpn.example 1194
+        pull-filter ignore "dhcp-option DNS"
+        pull-filter ignore "route-ipv6 "
+        """)
+        var s = TunnelSettings()
+        s.splitDNSDomains = ["lime-shine.com", "lime-shop.ru"]
+
+        let text = try base.applying(s).render()
+        #expect(!text.contains(#"pull-filter ignore "dhcp-option DNS""#))
+        #expect(text.contains(#"pull-filter ignore "route-ipv6 ""#))
+        #expect(text.contains("dhcp-option DOMAIN lime-shine.com"))
+        #expect(text.contains("dhcp-option DOMAIN-SEARCH lime-shop.ru"))
+    }
+
+    @Test func profileDNSFilterIsPreservedWithoutSplitDNSOverride() throws {
+        let base = try OpenVPNConfig.parse("""
+        client
+        remote vpn.example 1194
+        pull-filter ignore "dhcp-option DNS"
+        """)
+
+        let text = try base.applying(TunnelSettings()).render()
+        #expect(text.contains(#"pull-filter ignore "dhcp-option DNS""#))
+    }
 }
 
 @Suite struct TunnelSettingsCodingTests {
