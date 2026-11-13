@@ -307,3 +307,5 @@ Bridge is free and open source. If it keeps you connected, you can support devel
 MIT, see [LICENSE](LICENSE). Copyright © 2026 Andrey Samarin.
 
 Bundled backends keep their own licenses: [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (MIT), [OpenVPN](https://github.com/OpenVPN/openvpn) (GPL-2.0), [OpenConnect](https://www.infradead.org/openconnect/) (LGPL-2.1) and [Xray-core](https://github.com/XTLS/Xray-core) (MPL-2.0), each built from unmodified upstream source.
+
+Product names and logos (WireGuard, OpenVPN, Cisco, Fortinet, Palo Alto Networks, F5, Juniper and others) are trademarks of their respective owners. Bridge shows them only to identify the services it can connect to and is not affiliated with or endorsed by them. Logo artwork comes from [Simple Icons](https://simpleicons.org) (CC0).

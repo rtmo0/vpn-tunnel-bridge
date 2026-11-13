@@ -196,22 +196,41 @@ private struct KindCard: View {
     }
 }
 
-/// A colored tile with the protocol's short label.
+/// A white tile with the protocol's logo (or a monogram when there is none) and a
+/// strip of its color along the bottom.
 struct KindTile: View {
     let kind: AddTunnelKind
     let size: CGFloat
 
+    private var tint: Color { BrandLogos.color(for: kind).map(Color.init(nsColor:)) ?? kind.color }
+
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.24)
-            .fill(LinearGradient(colors: [kind.color.opacity(0.85), kind.color], startPoint: .top, endPoint: .bottom))
-            .frame(width: size, height: size)
-            .overlay(
-                Text(kind.badge)
-                    .font(.system(size: size * (kind.badge.count > 3 ? 0.24 : 0.32), weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white)
-                    .minimumScaleFactor(0.6)
-                    .padding(.horizontal, 3)
-            )
+        let shape = RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+        ZStack(alignment: .bottom) {
+            shape.fill(Color.white)
+            Group {
+                if let logo = BrandLogos.image(for: kind) {
+                    Image(nsImage: logo)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .padding(size * BrandLogos.inset(for: kind))
+                } else {
+                    Text(kind.badge)
+                        .font(.system(size: size * (kind.badge.count > 3 ? 0.24 : 0.32), weight: .heavy, design: .rounded))
+                        .foregroundStyle(tint)
+                        .minimumScaleFactor(0.6)
+                        .padding(.horizontal, 3)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.bottom, size * 0.06)
+            Rectangle().fill(tint).frame(height: size * 0.1)
+        }
+        .frame(width: size, height: size)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
     }
 }
 

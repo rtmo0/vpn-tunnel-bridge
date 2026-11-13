@@ -139,7 +139,7 @@ public enum OpenConnectLogin {
         var typed: (username: String, password: String, remember: Bool)?
         var log: [String] = []
 
-        func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+        @Sendable func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
 
         while let line = reader.next() {
             guard let message = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],

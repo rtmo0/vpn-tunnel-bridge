@@ -342,7 +342,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         var protocols = body
         protocols[.font] = NSFont.systemFont(ofSize: 11, weight: .medium)
         protocols[.foregroundColor] = NSColor.labelColor
-        text.append(NSAttributedString(string: "AmneziaWG · WireGuard · OpenVPN\n\n", attributes: protocols))
+        text.append(NSAttributedString(string: "AmneziaWG · WireGuard · OpenVPN · OpenConnect\n"
+                                       + "VLESS · Trojan · Hysteria 2\n\n", attributes: protocols))
         text.append(NSAttributedString(string: "Free and open source under the MIT License.\n", attributes: body))
         text.append(NSAttributedString(
             string: "Use, copy, modify and distribute it freely; provided “as is”, without warranty.\n",
@@ -352,7 +353,10 @@ final class MenuController: NSObject, NSMenuDelegate {
         link[.foregroundColor] = NSColor.linkColor
         text.append(NSAttributedString(string: repo.replacingOccurrences(of: "https://", with: ""), attributes: link))
         text.append(NSAttributedString(
-            string: "\n\nIncludes amneziawg-go (MIT) and OpenVPN (GPL-2.0).",
+            string: "\n\nIncludes amneziawg-go (MIT), OpenVPN (GPL-2.0), OpenConnect (LGPL-2.1) "
+                + "and Xray-core (MPL-2.0).\n"
+                + "Product names and logos are trademarks of their owners, shown to identify "
+                + "compatible services; logo artwork from Simple Icons (CC0).",
             attributes: body))
         return text
     }
