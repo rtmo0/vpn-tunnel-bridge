@@ -218,47 +218,31 @@ final class AppModel: ObservableObject {
 
     // MARK: Library
 
-    func importConfigs() {
-        NSApp.activate(ignoringOtherApps: true)
-        let panel = NSOpenPanel()
-        panel.title = "Import Tunnels"
-        panel.message = "WireGuard / AmneziaWG (.conf), OpenVPN (.ovpn), or files with vless:// / trojan:// / hysteria2:// links"
-        panel.prompt = "Import"
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK else { return }
+    /// Imports config files (several at once); returns the added tunnels and per-file errors.
+    func importFiles(_ urls: [URL]) -> (names: [String], errors: [String]) {
+        var names: [String] = []
         var errors: [String] = []
-        for url in panel.urls {
-            do { _ = try TunnelLibrary.importFile(at: url) } catch {
+        for url in urls {
+            do { names += try TunnelLibrary.importFile(at: url).map(\.name) } catch {
                 errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
             }
         }
-        if !errors.isEmpty { Alerts.show("Some files could not be imported", errors.joined(separator: "\n")) }
         refresh()
+        return (names, errors)
     }
 
-    /// Imports vless:// / trojan:// / hysteria2:// links (or a base64 subscription) from the clipboard.
-    func importFromClipboard() {
-        NSApp.activate(ignoringOtherApps: true)
-        let text = NSPasteboard.general.string(forType: .string) ?? ""
-        do {
-            let result = try TunnelLibrary.importLinks(text)
-            if !result.errors.isEmpty {
-                let title = result.saved.isEmpty ? "The links could not be imported" : "Some links could not be imported"
-                Alerts.show(title, result.errors.joined(separator: "\n"))
-            }
-        } catch {
-            Alerts.show("Nothing to import",
-                        "Copy one or more vless://, trojan:// or hysteria2:// links (or a subscription) first.")
-        }
+    /// Imports vless:// / trojan:// / hysteria2:// links or a base64 subscription.
+    func importLinks(_ text: String) throws -> (names: [String], errors: [String]) {
+        let result = try TunnelLibrary.importLinks(text)
         refresh()
+        return (result.saved.map(\.name), result.errors)
     }
 
-    /// Asks for an OpenConnect server and adds it to the library.
-    func addOpenConnectServer() {
-        guard let name = AppOpenConnectUI.addServer() else { return }
+    /// Saves a new OpenConnect server; returns the tunnel's name.
+    func addOpenConnect(_ config: OpenConnectConfig, name: String?) throws -> String {
+        let saved = try TunnelLibrary.addOpenConnect(config, name: name)
         refresh()
-        ManageWindow.show(model: self, select: name)
+        return saved.name
     }
 
     // MARK: Routing profiles

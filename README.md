@@ -97,11 +97,11 @@ The helper is a background service (`/Library/PrivilegedHelperTools/com.rtmo0.br
 
 ### 4. Add your tunnels
 
-1. Click the shield and choose **Import Tunnel(s) from File…** (⌘O).
-2. Pick one or more `.conf` (WireGuard / AmneziaWG) or `.ovpn` (OpenVPN) files.
-   - For OpenVPN, certificates and keys that the `.ovpn` points to are copied into Bridge. You can delete the original files afterwards.
-   - If the `.ovpn` comes with a login file (`auth-user-pass file.txt`), the username and password go into the Keychain.
-   - For VLESS, Trojan and Hysteria 2, copy one or more `vless://`, `trojan://` or `hysteria2://` links (or a subscription) and choose **Import Links from Clipboard** (⇧⌘V). A file with links works with **Import Tunnel(s) from File…** too.
+1. Click the shield, choose **Manage Tunnels…** (⌘,) and click **+** at the bottom of the list.
+2. Pick the kind of VPN you have, then:
+   - **AmneziaWG, WireGuard, OpenVPN**: drop the `.conf` / `.ovpn` files in, or choose them. For OpenVPN, certificates and keys the `.ovpn` points to are copied into Bridge (you can delete the originals), and a login file (`auth-user-pass file.txt`) goes into the Keychain.
+   - **VLESS, Trojan, Hysteria 2**: paste one or more `vless://`, `trojan://` or `hysteria2://` links or a subscription (copied links are filled in for you).
+   - **Cisco AnyConnect, Fortinet, GlobalProtect, Ivanti, Juniper, F5, Array**: enter the server address and, optionally, username and group.
 3. To connect, click the tunnel's name in the menu. A check mark means it's connected; the line underneath shows uptime and speed.
 
 OpenVPN servers that need a login ask for a username and password the first time. Tick **Remember in Keychain** and you won't be asked again.
@@ -124,8 +124,6 @@ Open **System Settings → General → Login Items** and add **Bridge** under *O
 | **Status** | Connected tunnel, connecting, inactive, or a helper or kill switch notice |
 | Tunnel names | Click to connect or disconnect. ✓ = connected; animated dots = connecting |
 | **Disconnect All** | Shown while anything is connected |
-| **Import Tunnel(s) from File…** | Add `.conf` / `.ovpn` files or files with share links |
-| **Import Links from Clipboard** (⇧⌘V) | Add copied `vless://`, `trojan://`, `hysteria2://` links or a base64 subscription |
 | **Manage Tunnels…** (⌘,) | The window with details and settings |
 | **Update to Bridge x.y…** | Shown when a new release is out |
 | **Unblock Internet (Kill Switch)** | Shown when a dropped tunnel's kill switch is blocking traffic |
@@ -150,7 +148,7 @@ Select a tunnel on the left. On the right:
 
 Changes are saved with **Save** (⌘S). If the tunnel is connected, Bridge offers to reconnect it so they take effect. The config file itself is never changed by these settings.
 
-The **+** and **−** buttons at the bottom of the list import and remove tunnels. The page icon opens the logs.
+The **+** button at the bottom of the list adds a tunnel of any kind (file, links or server); **−** removes the selected one. The page icon opens the logs.
 
 ### Kill switch
 
@@ -167,7 +165,7 @@ These run through the bundled Xray-core.
 
 ### OpenConnect (Cisco AnyConnect, Fortinet, GlobalProtect…)
 
-- Add a server with **Add OpenConnect Server…** in the menu: type, server address (`vpn.example.com` or `vpn.example.com/group`), and optionally username and group. Or import a `.openconnect` profile file.
+- Add a server with **+** in Manage Tunnels: pick its type, then enter the server address (`vpn.example.com` or `vpn.example.com/group`), and optionally username and group. Or import a `.openconnect` profile file.
 - When you connect, Bridge logs in as you: it shows the server's own forms (group, username, password, one-time code), and opens a sign-in window for SSO (SAML / OIDC, e.g. Okta or Microsoft Entra). Only the resulting session goes to the helper.
 - Tick **Remember in Keychain** and the username and password are filled in next time; one-time codes are always asked.
 - A server with a self-signed certificate asks once; **Always trust** saves its fingerprint in the profile (`ServerCert = pin-sha256:…`).

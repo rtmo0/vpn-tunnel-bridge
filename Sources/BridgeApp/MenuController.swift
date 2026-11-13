@@ -161,9 +161,6 @@ final class MenuController: NSObject, NSMenuDelegate {
         if model.rows.contains(where: { $0.status != nil }) {
             menu.addItem(action("Disconnect All", #selector(disconnectAll)))
         }
-        menu.addItem(action("Import Tunnel(s) from File…", #selector(importConfigs), key: "o"))
-        menu.addItem(action("Import Links from Clipboard", #selector(importFromClipboard), key: "V"))
-        menu.addItem(action("Add OpenConnect Server…", #selector(addOpenConnect)))
         menu.addItem(action("Manage Tunnels…", #selector(manageTunnels), key: ","))
 
         menu.addItem(.separator())
@@ -298,9 +295,6 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     @objc private func toggleTunnel(_ sender: Any?) { if let name = name(sender) { model.toggle(name) } }
     @objc private func disconnectAll() { model.disconnectAll() }
-    @objc private func importConfigs() { model.importConfigs() }
-    @objc private func importFromClipboard() { model.importFromClipboard() }
-    @objc private func addOpenConnect() { model.addOpenConnectServer() }
     @objc private func openFolder() { model.openTunnelsFolder() }
     @objc private func openLogs() { model.openLogs() }
     @objc private func reveal(_ sender: Any?) { if let name = name(sender) { model.reveal(name) } }

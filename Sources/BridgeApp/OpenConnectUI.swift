@@ -122,67 +122,6 @@ final class AppOpenConnectUI: OpenConnectLoginUI {
         for (name, read) in readers { values[name] = read() }
         return (values, remember?.state == .on)
     }
-
-    // MARK: Adding a server
-
-    /// Asks for an OpenConnect server and saves it; returns the new tunnel's name.
-    static func addServer() -> String? {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Add OpenConnect Server"
-        alert.informativeText = "Cisco AnyConnect / ocserv, Fortinet, GlobalProtect, Pulse / Ivanti, F5 or Array. "
-            + "Bridge asks for the password, one-time code or SSO sign-in when you connect."
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-
-        let protocols = NSPopUpButton()
-        for p in OpenConnectConfig.VPNProtocol.allCases {
-            protocols.addItem(withTitle: p.displayName)
-            protocols.lastItem?.representedObject = p.rawValue
-        }
-        func text(_ placeholder: String) -> NSTextField {
-            let f = NSTextField()
-            f.placeholderString = placeholder
-            f.translatesAutoresizingMaskIntoConstraints = false
-            f.widthAnchor.constraint(equalToConstant: 260).isActive = true
-            return f
-        }
-        let server = text("vpn.example.com or vpn.example.com/group")
-        let user = text("Optional")
-        let group = text("Optional")
-        let name = text("Optional")
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Type"), protocols],
-            [NSTextField(labelWithString: "Server"), server],
-            [NSTextField(labelWithString: "Username"), user],
-            [NSTextField(labelWithString: "Group"), group],
-            [NSTextField(labelWithString: "Name"), name],
-        ])
-        grid.rowSpacing = 8
-        grid.column(at: 0).xPlacement = .trailing
-        grid.layoutSubtreeIfNeeded()
-        grid.frame.size = grid.fittingSize
-        alert.accessoryView = grid
-        alert.window.initialFirstResponder = server
-
-        while alert.runModal() == .alertFirstButtonReturn {
-            let raw = server.stringValue.trimmingCharacters(in: .whitespaces)
-            guard !raw.isEmpty else { continue }
-            let kind = (protocols.selectedItem?.representedObject as? String).flatMap(OpenConnectConfig.VPNProtocol.init)
-            var config = OpenConnectConfig(vpnProtocol: kind ?? .anyconnect, server: raw)
-            let u = user.stringValue.trimmingCharacters(in: .whitespaces)
-            let g = group.stringValue.trimmingCharacters(in: .whitespaces)
-            config.username = u.isEmpty ? nil : u
-            config.group = g.isEmpty ? nil : g
-            let n = name.stringValue.trimmingCharacters(in: .whitespaces)
-            do {
-                return try TunnelLibrary.addOpenConnect(config, name: n.isEmpty ? nil : n).name
-            } catch {
-                Alerts.show("Could not add the server", error.localizedDescription)
-            }
-        }
-        return nil
-    }
 }
 
 /// SSO sign-in page (SAML, OIDC) in a small browser window. Every finished page

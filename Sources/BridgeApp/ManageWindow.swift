@@ -47,6 +47,7 @@ struct ManageView: View {
     @EnvironmentObject var selection: ManageSelection
 
     private var saved: [AppModel.Row] { model.rows.filter(\.saved) }
+    @State private var adding = false
 
     var body: some View {
         // A plain HStack instead of NavigationSplitView: hosted in our own window the
@@ -59,6 +60,13 @@ struct ManageView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .ignoresSafeArea(.container, edges: .top)
+        .sheet(isPresented: $adding) {
+            AddTunnelSheet { name in
+                adding = false
+                if let name { selection.name = name }
+            }
+            .environmentObject(model)
+        }
         .onChange(of: saved.map(\.name)) { _, names in
             if let current = selection.name, !names.contains(current) { selection.name = names.first }
             if selection.name == nil { selection.name = names.first }
@@ -77,8 +85,8 @@ struct ManageView: View {
             .padding(.top, 34)  // room for the window buttons
             Divider()
             HStack(spacing: 2) {
-                Button { model.importConfigs() } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
-                    .help("Import tunnels from .conf / .ovpn files or files with share links")
+                Button { adding = true } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
+                    .help("Add a tunnel")
                 Button {
                     if let name = selection.name { model.remove(name) }
                 } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
@@ -101,14 +109,13 @@ struct ManageView: View {
                 .padding(.top, 22)
         } else {
             ContentUnavailableView {
-                Label("No Tunnel Selected", systemImage: "shield")
+                Label(saved.isEmpty ? "No Tunnels Yet" : "No Tunnel Selected", systemImage: "shield")
             } description: {
-                Text("Import a WireGuard / AmneziaWG .conf or an OpenVPN .ovpn file with +, "
-                     + "or paste a vless://, trojan:// or hysteria2:// link")
+                Text("WireGuard, AmneziaWG, OpenVPN, VLESS, Trojan, Hysteria 2, or a Cisco, Fortinet, "
+                     + "GlobalProtect or other OpenConnect server.")
             } actions: {
-                Button("Import Tunnels…") { model.importConfigs() }
-                Button("Paste Links") { model.importFromClipboard() }
-                Button("Add OpenConnect Server…") { model.addOpenConnectServer() }
+                Button("Add Tunnel…") { adding = true }
+                    .buttonStyle(.borderedProminent)
             }
         }
     }
