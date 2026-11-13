@@ -8,7 +8,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     private let model: AppModel
     private let updater = Updater()
     private var updateItem: NSMenuItem?
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    // A fixed width: the glyph is always 18×18, and a variable-length item is laid out
+    // again on every image change, which makes it jitter while being ⌘-dragged.
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private var refreshTimer: Timer?
     private var animationTimer: Timer?
@@ -70,15 +72,21 @@ final class MenuController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Sets the glyph only when it actually changes (the status refresh runs every 2 s).
+    private func setIcon(_ image: NSImage) {
+        guard let button = statusItem.button, button.image !== image else { return }
+        button.image = image
+    }
+
     private func updateIcon() {
         let state = model.iconState
-        statusItem.button?.image = MenuBarIcon.image(state, frame: animationFrame)
+        setIcon(MenuBarIcon.image(state, frame: animationFrame))
         if state == .connecting {
             guard animationTimer == nil else { return }
             let timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 self.animationFrame += 1
-                self.statusItem.button?.image = MenuBarIcon.image(self.model.iconState, frame: self.animationFrame)
+                self.setIcon(MenuBarIcon.image(self.model.iconState, frame: self.animationFrame))
                 for item in self.busyItems { item.image = ProtocolIcon.loading(frame: self.animationFrame) }
             }
             RunLoop.main.add(timer, forMode: .common)
