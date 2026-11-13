@@ -146,9 +146,7 @@ struct TunnelListRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(nsImage: ProtocolIcon.image(row.kind))
-                .renderingMode(.template)
-                .foregroundStyle(.secondary)
+            KindTile(kind: row.brand, size: 18, shadow: false)
             Text(row.name).lineLimit(1)
             Spacer()
             Circle().fill(dot).frame(width: 7, height: 7)
@@ -308,11 +306,7 @@ struct TunnelDetail: View {
 
     private var header: some View {
             HStack(spacing: 12) {
-                Image(nsImage: ProtocolIcon.image(summary?.kind ?? row?.kind ?? .wireguard))
-                    .renderingMode(.template)
-                    .resizable()
-                    .frame(width: 40, height: 23)
-                    .foregroundStyle(.secondary)
+                KindTile(kind: row?.brand ?? AddTunnelKind(summary?.kind ?? .wireguard), size: 36)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name).font(.title3.weight(.semibold))
                     Text(stateText).font(.callout).foregroundStyle(.secondary)

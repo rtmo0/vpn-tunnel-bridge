@@ -101,6 +101,36 @@ enum AddTunnelKind: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The tile for a tunnel of `kind`; OpenConnect without a known protocol shows AnyConnect.
+    init(_ kind: TunnelKind, openConnect vpnProtocol: OpenConnectConfig.VPNProtocol? = nil) {
+        switch kind {
+        case .amneziawg: self = .amneziawg
+        case .wireguard: self = .wireguard
+        case .openvpn: self = .openvpn
+        case .vless: self = .vless
+        case .trojan: self = .trojan
+        case .hysteria2: self = .hysteria2
+        case .openconnect:
+            switch vpnProtocol ?? .anyconnect {
+            case .anyconnect: self = .anyconnect
+            case .fortinet: self = .fortinet
+            case .gp: self = .globalprotect
+            case .nc: self = .juniper
+            case .pulse: self = .pulse
+            case .f5: self = .f5
+            case .array: self = .array
+            }
+        }
+    }
+
+    /// Reads an OpenConnect profile to find its vendor. Call off the main thread.
+    static func brand(of saved: SavedTunnel) -> AddTunnelKind {
+        guard saved.kind == .openconnect,
+              let text = try? String(contentsOf: saved.url, encoding: .utf8),
+              let config = try? OpenConnectConfig.parse(text) else { return AddTunnelKind(saved.kind) }
+        return AddTunnelKind(.openconnect, openConnect: config.vpnProtocol)
+    }
+
     static let groups: [(title: String, kinds: [AddTunnelKind])] = [
         ("Config file", [.amneziawg, .wireguard, .openvpn]),
         ("Share link", [.vless, .trojan, .hysteria2]),
@@ -197,12 +227,16 @@ private struct KindCard: View {
 }
 
 /// A white tile with the protocol's logo (or a monogram when there is none) and a
-/// strip of its color along the bottom.
+/// strip of its color along the bottom. The same tile marks tunnels everywhere:
+/// this sheet, the Manage window and the menu.
 struct KindTile: View {
     let kind: AddTunnelKind
     let size: CGFloat
+    var shadow = true
 
     private var tint: Color { BrandLogos.color(for: kind).map(Color.init(nsColor:)) ?? kind.color }
+    /// Menu-sized tiles have no room for margins: the monogram fills the width.
+    private var small: Bool { size < 24 }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
@@ -214,23 +248,43 @@ struct KindTile: View {
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fit)
-                        .padding(size * BrandLogos.inset(for: kind))
+                        .padding(size * BrandLogos.inset(for: kind) * (small ? 0.75 : 1))
                 } else {
                     Text(kind.badge)
-                        .font(.system(size: size * (kind.badge.count > 3 ? 0.24 : 0.32), weight: .heavy, design: .rounded))
+                        .font(.system(size: size * (small ? 0.42 : kind.badge.count > 3 ? 0.24 : 0.32),
+                                      weight: .heavy, design: .rounded))
                         .foregroundStyle(tint)
-                        .minimumScaleFactor(0.6)
-                        .padding(.horizontal, 3)
+                        .lineLimit(1)
+                        .minimumScaleFactor(small ? 0.4 : 0.6)
+                        .padding(.horizontal, small ? 1 : 3)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.bottom, size * 0.06)
-            Rectangle().fill(tint).frame(height: size * 0.1)
+            Rectangle().fill(tint).frame(height: max(size * 0.1, 1.5))
         }
         .frame(width: size, height: size)
         .clipShape(shape)
-        .overlay(shape.strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
+        .overlay(shape.strokeBorder(Color.black.opacity(small ? 0.18 : 0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(shadow ? 0.25 : 0), radius: 1.5, y: 1)
+    }
+
+    private static var cache: [AddTunnelKind: NSImage] = [:]
+
+    /// The tile as a 16 pt image for menu items, drawn at Retina scale. Main thread only,
+    /// like the rest of the menu.
+    static func menuImage(_ kind: AddTunnelKind) -> NSImage {
+        if let cached = cache[kind] { return cached }
+        let cgImage = MainActor.assumeIsolated {
+            let renderer = ImageRenderer(content: KindTile(kind: kind, size: 16, shadow: false))
+            renderer.scale = 2
+            return renderer.cgImage
+        }
+        let image = cgImage.map { NSImage(cgImage: $0, size: NSSize(width: 16, height: 16)) }
+            ?? NSImage(size: NSSize(width: 16, height: 16))
+        image.accessibilityDescription = kind.title
+        cache[kind] = image
+        return image
     }
 }
 

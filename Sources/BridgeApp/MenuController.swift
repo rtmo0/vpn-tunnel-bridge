@@ -8,9 +8,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     private let model: AppModel
     private let updater = Updater()
     private var updateItem: NSMenuItem?
-    // A fixed width: the glyph is always 18×18, and a variable-length item is laid out
-    // again on every image change, which makes it jitter while being ⌘-dragged.
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    // A fixed width: the glyph is always the same size, and a variable-length item is laid
+    // out again on every image change, which makes it jitter while being ⌘-dragged.
+    private let statusItem = NSStatusBar.system.statusItem(withLength: MenuBarIcon.size.width + 8)
     private let menu = NSMenu()
     private var refreshTimer: Timer?
     private var animationTimer: Timer?
@@ -197,8 +197,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         let item = NSMenuItem(title: row.name, action: #selector(toggleTunnel(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = row.name
-        item.image = ProtocolIcon.image(row.kind)
-        item.toolTip = row.kind.displayName
+        item.image = KindTile.menuImage(row.brand)
+        item.toolTip = row.brand.title
         if model.busy.contains(row.name) || (row.status != nil && row.status?.connected == false) {
             item.image = ProtocolIcon.loading(frame: animationFrame)
             busyItems.append(item)
@@ -262,7 +262,7 @@ final class MenuController: NSObject, NSMenuDelegate {
             let entry = NSMenuItem(title: row.name, action: selector, keyEquivalent: "")
             entry.target = self
             entry.representedObject = row.name
-            entry.image = ProtocolIcon.image(row.kind)
+            entry.image = KindTile.menuImage(row.brand)
             sub.addItem(entry)
         }
         item.submenu = sub

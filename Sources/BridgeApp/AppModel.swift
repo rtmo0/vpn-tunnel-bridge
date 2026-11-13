@@ -12,9 +12,11 @@ final class AppModel: ObservableObject {
         let kind: TunnelKind
         var status: TunnelStatus?
         var saved: Bool
+        /// Which logo to show: OpenConnect tunnels are told apart by their VPN protocol.
+        var brand: AddTunnelKind
 
         static func == (a: Row, b: Row) -> Bool {
-            a.name == b.name && a.kind == b.kind && a.saved == b.saved
+            a.name == b.name && a.kind == b.kind && a.saved == b.saved && a.brand == b.brand
                 && a.status?.state == b.status?.state && a.status?.connected == b.status?.connected
                 && a.status?.rxBytes == b.status?.rxBytes && a.status?.txBytes == b.status?.txBytes
         }
@@ -73,6 +75,7 @@ final class AppModel: ObservableObject {
         let previous = rows
         work.async {
             let saved = TunnelLibrary.list()
+            let brands = Dictionary(uniqueKeysWithValues: saved.map { ($0.name, AddTunnelKind.brand(of: $0)) })
             let availability = HelperClient.availability(expectedBuild: Updater.currentBuild)
             var statuses: [TunnelStatus]?
             var holds: [String]?
@@ -84,13 +87,15 @@ final class AppModel: ObservableObject {
                 self.refreshing = false
                 let active = statuses ?? previous.compactMap(\.status)
                 var rows = saved.map { entry in
-                    Row(name: entry.name, kind: entry.kind, status: active.first { $0.name == entry.name }, saved: true)
+                    Row(name: entry.name, kind: entry.kind, status: active.first { $0.name == entry.name }, saved: true,
+                        brand: brands[entry.name] ?? AddTunnelKind(entry.kind))
                 }
                 for status in active where !rows.contains(where: { $0.name == status.name }) {
-                    rows.append(Row(name: status.name, kind: status.kind, status: status, saved: false))
+                    rows.append(Row(name: status.name, kind: status.kind, status: status, saved: false,
+                                    brand: AddTunnelKind(status.kind)))
                 }
                 if case .ready = availability {} else {
-                    rows = rows.map { Row(name: $0.name, kind: $0.kind, status: nil, saved: $0.saved) }
+                    rows = rows.map { Row(name: $0.name, kind: $0.kind, status: nil, saved: $0.saved, brand: $0.brand) }
                 }
                 if statuses != nil { self.updateRates(rows) }
                 let changed = rows != self.rows || availability != self.helper
