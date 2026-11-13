@@ -269,6 +269,20 @@ struct KindTile: View {
         .shadow(color: .black.opacity(shadow ? 0.25 : 0), radius: 1.5, y: 1)
     }
 
+    /// All tiles in two centered rows for the About panel: protocols, then OpenConnect vendors.
+    static let aboutGrid: NSImage = MainActor.assumeIsolated {
+        let rows = AddTunnelKind.groups.map(\.kinds)
+        let view = VStack(spacing: 6) {
+            HStack(spacing: 6) { ForEach(rows.dropLast().flatMap { $0 }) { KindTile(kind: $0, size: 22, shadow: false) } }
+            HStack(spacing: 6) { ForEach(rows.last ?? []) { KindTile(kind: $0, size: 22, shadow: false) } }
+        }
+        .padding(1)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        guard let cgImage = renderer.cgImage else { return NSImage() }
+        return NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width) / 2, height: CGFloat(cgImage.height) / 2))
+    }
+
     private static var cache: [AddTunnelKind: NSImage] = [:]
 
     /// The tile as a 16 pt image for menu items, drawn at Retina scale. Main thread only,
