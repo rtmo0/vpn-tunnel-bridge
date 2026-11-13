@@ -350,8 +350,29 @@ final class MenuController: NSObject, NSMenuDelegate {
         var protocols = body
         protocols[.font] = NSFont.systemFont(ofSize: 11, weight: .medium)
         protocols[.foregroundColor] = NSColor.labelColor
-        text.append(NSAttributedString(string: "AmneziaWG · WireGuard · OpenVPN · OpenConnect\n"
-                                       + "VLESS · Trojan · Hysteria 2\n\n", attributes: protocols))
+        // The protocols with the same tiles as the menu, and OpenConnect's vendors in a row.
+        func tile(_ kind: AddTunnelKind) -> NSAttributedString {
+            let attachment = NSTextAttachment()
+            attachment.image = KindTile.menuImage(kind)
+            attachment.bounds = NSRect(x: 0, y: -3, width: 14, height: 14)
+            return NSAttributedString(attachment: attachment)
+        }
+        func line(_ kinds: [AddTunnelKind]) {
+            for (i, kind) in kinds.enumerated() {
+                if i > 0 { text.append(NSAttributedString(string: "   ", attributes: protocols)) }
+                text.append(tile(kind))
+                text.append(NSAttributedString(string: " \(kind.title)", attributes: protocols))
+            }
+            text.append(NSAttributedString(string: "\n", attributes: protocols))
+        }
+        line([.amneziawg, .wireguard, .openvpn])
+        line([.vless, .trojan, .hysteria2])
+        text.append(NSAttributedString(string: "OpenConnect ", attributes: protocols))
+        for kind in AddTunnelKind.groups.last?.kinds ?? [] {
+            text.append(NSAttributedString(string: " ", attributes: protocols))
+            text.append(tile(kind))
+        }
+        text.append(NSAttributedString(string: "\n\n", attributes: protocols))
         text.append(NSAttributedString(string: "Free and open source under the MIT License.\n", attributes: body))
         text.append(NSAttributedString(
             string: "Use, copy, modify and distribute it freely; provided “as is”, without warranty.\n",
