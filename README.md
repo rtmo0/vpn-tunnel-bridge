@@ -20,11 +20,14 @@ Bridge started as a replacement for clients that silently drop newer AmneziaWG s
 
 It needs no Network Extension, no Apple Developer account and no App Store. A small helper runs the VPN backends with administrator rights, much like Tunnelblick or Shimo do.
 
+![Menu bar icon: off, connecting, connected, three tunnels, error](docs/habr/images/menu-icon.png)
+
 ## What it can do
 
 | | Feature |
 | :-: | --- |
-| ✅ | Lives in the menu bar, no Dock icon. The shield shows the state: empty, connecting, a check mark, or the number of connected tunnels |
+| ✅ | Lives in the menu bar, no Dock icon. The **VPN** icon shows the state: outlined when off, dots while connecting, filled when connected, the number of connected tunnels when there are several, or **!** on an error |
+| ✅ | Each tunnel shows its protocol's logo (WireGuard, OpenVPN, Cisco, Fortinet, GlobalProtect, F5…) in the menu and the Manage window |
 | ✅ | **AmneziaWG** with every parameter: `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` (including ranges), `I1`–`I5`, `HeaderProtectionKey`, `ContentPaddingAddition`, timing options |
 | ✅ | **WireGuard** configs as they are |
 | ✅ | **OpenVPN 2.7**: username and password, certificates, passphrase-protected keys, one-time codes (static challenge), DNS pushed by the server |
@@ -89,15 +92,15 @@ open /Applications/Bridge.app
 
 ### 3. Install the network helper
 
-1. A shield icon appears in the menu bar, at the top right of the screen. Bridge has no Dock icon and no window by default.
-2. Click the shield and choose **Install Helper…**.
+1. A **VPN** icon appears in the menu bar, at the top right of the screen. Bridge has no Dock icon and no window by default.
+2. Click the VPN icon and choose **Install Helper…**.
 3. Enter your Mac password when asked.
 
 The helper is a background service (`/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper`). It creates the tunnels, sets routes and DNS, and keeps tunnels running even when the app is closed. Bridge asks to update it after every app update. This also takes one password prompt, and it briefly disconnects your tunnels.
 
 ### 4. Add your tunnels
 
-1. Click the shield, choose **Manage Tunnels…** (⌘,) and click **+** at the bottom of the list.
+1. Click the VPN icon, choose **Manage Tunnels…** (⌘,) and click **+** at the bottom of the list.
 2. Pick the kind of VPN you have, then:
    - **AmneziaWG, WireGuard, OpenVPN**: drop the `.conf` / `.ovpn` files in, or choose them. For OpenVPN, certificates and keys the `.ovpn` points to are copied into Bridge (you can delete the originals), and a login file (`auth-user-pass file.txt`) goes into the Keychain.
    - **VLESS, Trojan, Hysteria 2**: paste one or more `vless://`, `trojan://` or `hysteria2://` links or a subscription (copied links are filled in for you).
@@ -205,7 +208,7 @@ Bridge checks GitHub releases at launch and every six hours. You can also choose
 | Problem | What to check |
 | --- | --- |
 | macOS won't open Bridge | Step 2 of [Install](#2-allow-it-to-open-the-first-time) |
-| “Helper not installed” or “needs an update” | Click the shield → **Install / Update Helper…** |
+| “Helper not installed” or “needs an update” | Click the VPN icon → **Install / Update Helper…** |
 | Connected, but sites don't open | Another VPN app is also connected: disconnect it. Corporate VPN: internal names may need **DNS → Only for domains** |
 | Internal names don't resolve | Manage Tunnels → DNS: set the VPN's DNS server under *Custom* and the company domains under *Only for domains* |
 | No internet after a tunnel dropped | The kill switch is on: menu → **Unblock Internet (Kill Switch)** |
@@ -215,7 +218,7 @@ When reporting a bug, attach the relevant lines from these logs. They never cont
 
 ## Uninstall
 
-1. Click the shield → **Disconnect All**, then **Quit Bridge**.
+1. Click the VPN icon → **Disconnect All**, then **Quit Bridge**.
 2. Remove the helper:
    ```bash
    sudo /Applications/Bridge.app/Contents/Resources/install-helper.sh --uninstall
