@@ -29,6 +29,16 @@ final class AppModel: ObservableObject {
     private(set) var rates: [String: (rx: Double, tx: Double)] = [:]
     /// Tunnels that dropped with the kill switch on: the Mac has no internet until lifted.
     private(set) var killSwitchHolds: [String] = []
+    /// The settings each connected tunnel was brought up with; a saved change that differs
+    /// from these needs a reconnect to take effect.
+    private(set) var appliedSettings: [String: TunnelSettings] = [:]
+    /// Tunnels the user disconnected (or is reconnecting): their going down is no news.
+    private var userStopped: Set<String> = []
+
+    func needsReconnect(_ name: String) -> Bool {
+        guard isActive(name), !busy.contains(name), let applied = appliedSettings[name] else { return false }
+        return applied != TunnelLibrary.settings(for: name)
+    }
 
     /// Called on the main thread whenever something visible changed.
     var onChange: () -> Void = {}
@@ -98,14 +108,35 @@ final class AppModel: ObservableObject {
                     rows = rows.map { Row(name: $0.name, kind: $0.kind, status: nil, saved: $0.saved, brand: $0.brand) }
                 }
                 if statuses != nil { self.updateRates(rows) }
+                // Tunnels already up when the app started: assume their current settings apply.
+                for row in rows where row.status != nil && self.appliedSettings[row.name] == nil && row.saved {
+                    self.appliedSettings[row.name] = TunnelLibrary.settings(for: row.name)
+                }
+                for name in self.appliedSettings.keys where !rows.contains(where: { $0.name == name && $0.status != nil }) {
+                    if !self.busy.contains(name) { self.appliedSettings[name] = nil }
+                }
                 let changed = rows != self.rows || availability != self.helper
                     || (holds != nil && holds != self.killSwitchHolds)
+                if statuses != nil { self.notifyDrops(from: self.rows, to: rows, holds: holds ?? []) }
                 if let holds { self.killSwitchHolds = holds }
                 self.rows = rows
                 self.helper = availability
                 if changed || statuses != nil { self.changed() }
             }
         }
+    }
+
+    /// A connected tunnel that went away without the user asking becomes a notification.
+    private func notifyDrops(from old: [Row], to new: [Row], holds: [String]) {
+        let up = Set(new.filter { $0.status != nil }.map(\.name))
+        for row in old where row.status?.connected == true && !up.contains(row.name)
+            && !busy.contains(row.name) && !userStopped.contains(row.name) {
+            let body = holds.contains(row.name)
+                ? String(localized: "The kill switch keeps traffic blocked until you reconnect or unblock it in the menu.")
+                : String(localized: "The connection to the server was lost.")
+            Notifier.post(String(localized: "“\(row.name)” disconnected"), body)
+        }
+        userStopped = userStopped.filter { up.contains($0) || busy.contains($0) }
     }
 
     private func updateRates(_ rows: [Row]) {
@@ -134,51 +165,61 @@ final class AppModel: ObservableObject {
     func connect(_ name: String) {
         guard helperReady else {
             let installed = helper != .notInstalled
-            let title = installed ? "The Bridge helper needs an update" : "The Bridge helper is not installed"
-            if Alerts.confirm(title, "Bridge will ask for your administrator password, then connect “\(name)”.",
-                              button: installed ? "Update and Connect" : "Install and Connect") {
+            let title = installed ? String(localized: "Update the network helper?") : String(localized: "Install the network helper?")
+            if Alerts.confirm(title, String(localized: "Bridge needs its helper to connect “\(name)”. macOS will ask for your administrator password once."),
+                              button: installed ? String(localized: "Update and Connect") : String(localized: "Install and Connect"), style: .informational) {
                 installHelper { [weak self] in self?.connect(name) }
             }
             return
         }
-        let canOpenVPN = capabilities.contains(.openvpn)
-        let available = Set(capabilities)
+        // A helper older than the app may lack a backend: offer the fix instead of a dead end.
+        if let kind = rows.first(where: { $0.name == name })?.kind,
+           kind == .openvpn || kind == .openconnect || kind.usesXray, !capabilities.contains(kind) {
+            let choice = Alerts.choose(String(localized: "Could not connect “\(name)”"),
+                                       String(localized: "The installed helper is older than the app and has no \(kind.displayName) support."),
+                                       buttons: [String(localized: "Update Helper and Retry"), String(localized: "Cancel")])
+            if choice == 0 { installHelper { [weak self] in self?.connect(name) } }
+            return
+        }
+        let settings = TunnelLibrary.settings(for: name)
+        userStopped.remove(name)
         setBusy(name, true)
         work.async {
             var failure: String?
+            var connected = false
             do {
                 let (text, kind) = try TunnelLibrary.load(name)
-                if kind == .openvpn && !canOpenVPN {
-                    throw ClientError("The installed helper has no OpenVPN. Choose “Update Helper…” in the Bridge menu.")
-                }
-                if (kind.usesXray || kind == .openconnect) && !available.contains(kind) {
-                    throw ClientError("The installed helper has no \(kind.displayName) support. "
-                        + "Choose “Update Helper…” in the Bridge menu.")
-                }
-                _ = try Connector.connect(name: name, text: text, kind: kind, openConnectUI: AppOpenConnectUI()) { prompt in
+                _ = try Connector.connect(name: name, text: text, kind: kind, settings: settings,
+                                          openConnectUI: AppOpenConnectUI()) { prompt in
                     DispatchQueue.main.sync { Prompter.ask(prompt) }
                 }
+                connected = true
             } catch let error as ClientError where error.description == "Cancelled" {
                 failure = nil
             } catch {
                 failure = error.localizedDescription
             }
             DispatchQueue.main.async {
+                if connected { self.appliedSettings[name] = settings }
                 self.setBusy(name, false)
-                if let failure { Alerts.show("Could not connect “\(name)”", failure) }
+                if let failure,
+                   Alerts.choose(String(localized: "Could not connect “\(name)”"), failure, buttons: [String(localized: "OK"), String(localized: "Show Log")], style: .warning) == 1 {
+                    self.openLogs()
+                }
                 self.refresh()
             }
         }
     }
 
     func disconnect(_ name: String) {
+        userStopped.insert(name)
         setBusy(name, true)
         work.async {
             var failure: String?
             do { try HelperClient.disconnect(name) } catch { failure = error.localizedDescription }
             DispatchQueue.main.async {
                 self.setBusy(name, false)
-                if let failure { Alerts.show("Could not disconnect “\(name)”", failure) }
+                if let failure { Alerts.show(String(localized: "Could not disconnect “\(name)”"), failure) }
                 self.refresh()
             }
         }
@@ -186,6 +227,7 @@ final class AppModel: ObservableObject {
 
     /// Disconnects and connects again, e.g. to apply new settings.
     func reconnect(_ name: String) {
+        userStopped.insert(name)
         setBusy(name, true)
         work.async {
             try? HelperClient.disconnect(name)
@@ -203,13 +245,14 @@ final class AppModel: ObservableObject {
             var failure: String?
             do { try HelperClient.releaseKillSwitch() } catch { failure = error.localizedDescription }
             DispatchQueue.main.async {
-                if let failure { Alerts.show("Could not lift the kill switch", failure) }
+                if let failure { Alerts.show(String(localized: "Could not lift the kill switch"), failure) }
                 self.refresh()
             }
         }
     }
 
     func disconnectAll() {
+        userStopped.formUnion(rows.filter { $0.status != nil }.map(\.name))
         work.async {
             _ = try? HelperClient.call(HelperRequest(command: .downAll))
             DispatchQueue.main.async { self.refresh() }
@@ -263,9 +306,9 @@ final class AppModel: ObservableObject {
             text = NSPasteboard.general.string(forType: .string) ?? ""
         } else {
             let panel = NSOpenPanel()
-            panel.title = "Import Routing Profile"
-            panel.message = "A routing profile (routing.json) for VLESS, Trojan and Hysteria 2 tunnels"
-            panel.prompt = "Import"
+            panel.title = String(localized: "Import Routing Profile")
+            panel.message = String(localized: "A routing profile (routing.json) for VLESS, Trojan and Hysteria 2 tunnels")
+            panel.prompt = String(localized: "Import")
             panel.allowedContentTypes = [.json, .plainText]
             guard panel.runModal() == .OK, let url = panel.url,
                   let contents = try? String(contentsOf: url, encoding: .utf8) else { return }
@@ -279,7 +322,7 @@ final class AppModel: ObservableObject {
                     self.changed()
                     done(name)
                 case .failure(let error):
-                    Alerts.show("Could not import the routing profile", error.localizedDescription)
+                    Alerts.show(String(localized: "Could not import the routing profile"), error.localizedDescription)
                 }
             }
         }
@@ -290,20 +333,20 @@ final class AppModel: ObservableObject {
             let result = Result { try RoutingProfiles.update(name) }
             DispatchQueue.main.async {
                 if case .failure(let error) = result {
-                    Alerts.show("Could not update “\(name)”", error.localizedDescription)
+                    Alerts.show(String(localized: "Could not update “\(name)”"), error.localizedDescription)
                 } else {
-                    Alerts.info("“\(name)” updated", "The geo files were downloaded again. Reconnect tunnels that use it.")
+                    Alerts.info(String(localized: "“\(name)” updated"), String(localized: "The geo files were downloaded again. Reconnect tunnels that use it."))
                 }
             }
         }
     }
 
     func removeRoutingProfile(_ name: String) -> Bool {
-        guard Alerts.confirm("Remove routing profile “\(name)”?",
-                             "Tunnels that use it go back to sending all traffic through the VPN.",
-                             button: "Remove") else { return false }
+        guard Alerts.confirm(String(localized: "Remove routing profile “\(name)”?"),
+                             String(localized: "Tunnels that use it go back to sending all traffic through the VPN."),
+                             button: String(localized: "Remove"), destructive: true) else { return false }
         do { try RoutingProfiles.remove(name) } catch {
-            Alerts.show("Could not remove “\(name)”", error.localizedDescription)
+            Alerts.show(String(localized: "Could not remove “\(name)”"), error.localizedDescription)
             return false
         }
         changed()
@@ -311,10 +354,11 @@ final class AppModel: ObservableObject {
     }
 
     func remove(_ name: String) {
-        guard Alerts.confirm("Remove “\(name)”?", "The configuration and its saved passwords will be deleted.",
-                             button: "Remove") else { return }
+        guard Alerts.confirm(String(localized: "Remove “\(name)”?"), String(localized: "The configuration and its saved passwords will be deleted. This can’t be undone."),
+                             button: String(localized: "Remove"), destructive: true) else { return }
+        userStopped.insert(name)
         if rows.first(where: { $0.name == name })?.status != nil { try? HelperClient.disconnect(name) }
-        do { try TunnelLibrary.remove(name) } catch { Alerts.show("Could not remove “\(name)”", error.localizedDescription) }
+        do { try TunnelLibrary.remove(name) } catch { Alerts.show(String(localized: "Could not remove “\(name)”"), error.localizedDescription) }
         refresh()
     }
 
@@ -344,7 +388,7 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 self.installing = false
                 self.helper = availability
-                if let failure { Alerts.show("Helper installation failed", failure) }
+                if let failure { Alerts.show(String(localized: "Helper installation failed"), failure) }
                 self.refresh()
                 if failure == nil, self.helperReady { next?() }
             }
@@ -354,30 +398,34 @@ final class AppModel: ObservableObject {
 
 enum Alerts {
     static func show(_ title: String, _ text: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.alertStyle = .warning
-        alert.runModal()
+        _ = choose(title, text, buttons: [String(localized: "OK")], style: .warning)
     }
 
     static func info(_ title: String, _ text: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.runModal()
+        _ = choose(title, text, buttons: [String(localized: "OK")], style: .informational)
     }
 
-    static func confirm(_ title: String, _ text: String, button: String) -> Bool {
+    /// The main button, then Cancel. A destructive action gets a red button.
+    static func confirm(_ title: String, _ text: String, button: String, destructive: Bool = false,
+                        style: NSAlert.Style = .warning) -> Bool {
+        choose(title, text, buttons: [button, String(localized: "Cancel")], style: style, destructive: destructive) == 0
+    }
+
+    /// Shows an alert and returns the index of the button pressed.
+    @discardableResult
+    static func choose(_ title: String, _ text: String, buttons: [String], style: NSAlert.Style = .informational,
+                       destructive: Bool = false) -> Int {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text
-        alert.addButton(withTitle: button)
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        return alert.runModal() == .alertFirstButtonReturn
+        alert.alertStyle = style
+        for button in buttons { alert.addButton(withTitle: button) }
+        if destructive, let first = alert.buttons.first {
+            first.hasDestructiveAction = true
+            alert.buttons.last?.keyEquivalent = "\r"
+            first.keyEquivalent = ""
+        }
+        return alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
     }
 }

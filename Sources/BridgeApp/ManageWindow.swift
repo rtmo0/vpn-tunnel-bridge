@@ -2,11 +2,14 @@ import AppKit
 import BridgeClient
 import BridgeCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Window
 
 final class ManageSelection: ObservableObject {
     @Published var name: String?
+    /// The Add Tunnel sheet is open.
+    @Published var adding = false
 }
 
 /// "Manage Tunnels" window: tunnel list on the left, details and settings on the right.
@@ -14,11 +17,11 @@ enum ManageWindow {
     private static var window: NSWindow?
     private static let selection = ManageSelection()
 
-    static func show(model: AppModel, select name: String? = nil) {
+    static func show(model: AppModel, select name: String? = nil, addTunnel: Bool = false) {
         if window == nil {
             let root = ManageView().environmentObject(model).environmentObject(selection)
             let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-            window.title = "Tunnels"
+            window.title = String(localized: "Tunnels")
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             // Like Mail or System Settings: the sidebar runs up under the traffic lights,
             // no title bar strip or separator line over the content.
@@ -26,8 +29,8 @@ enum ManageWindow {
             window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
             window.toolbarStyle = .unified
-            window.setContentSize(NSSize(width: 820, height: 580))
-            window.minSize = NSSize(width: 680, height: 440)
+            window.setContentSize(NSSize(width: 860, height: 620))
+            window.minSize = NSSize(width: 700, height: 480)
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName("BridgeManageWindow")
             if !window.setFrameUsingName("BridgeManageWindow") { window.center() }
@@ -35,6 +38,7 @@ enum ManageWindow {
         }
         if let name { selection.name = name }
         if selection.name == nil { selection.name = model.rows.first(where: \.saved)?.name }
+        if addTunnel { selection.adding = true }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         // A menu bar app isn't always frontmost; make sure the window is visible.
@@ -47,22 +51,33 @@ struct ManageView: View {
     @EnvironmentObject var selection: ManageSelection
 
     private var saved: [AppModel.Row] { model.rows.filter(\.saved) }
-    @State private var adding = false
+    @State private var dropTargeted = false
 
     var body: some View {
         // A plain HStack instead of NavigationSplitView: hosted in our own window the
         // split view draws a heavy black divider; this gives the native thin one.
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 220)
+                .frame(width: 240)
             Divider()
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .ignoresSafeArea(.container, edges: .top)
-        .sheet(isPresented: $adding) {
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor, lineWidth: 3)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            importDropped(providers)
+            return true
+        }
+        .sheet(isPresented: $selection.adding) {
             AddTunnelSheet { name in
-                adding = false
+                selection.adding = false
                 if let name { selection.name = name }
             }
             .environmentObject(model)
@@ -75,17 +90,25 @@ struct ManageView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $selection.name) {
-                ForEach(saved, id: \.name) { row in
-                    TunnelListRow(row: row, busy: model.busy.contains(row.name)).tag(row.name)
+            if saved.isEmpty {
+                Text("No tunnels")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 58)
+                Spacer()
+            } else {
+                List(selection: $selection.name) {
+                    ForEach(saved, id: \.name) { row in
+                        TunnelListRow(row: row, phase: model.phase(of: row)).tag(row.name)
+                    }
                 }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .padding(.top, 34)  // room for the window buttons
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .padding(.top, 34)  // room for the window buttons
             Divider()
             HStack(spacing: 2) {
-                Button { adding = true } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
+                Button { selection.adding = true } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
                     .help("Add a tunnel")
                 Button {
                     if let name = selection.name { model.remove(name) }
@@ -93,6 +116,11 @@ struct ManageView: View {
                     .disabled(selection.name == nil)
                     .help("Remove the selected tunnel")
                 Spacer()
+                Text("Bridge \(Updater.currentVersion)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 Button { model.openLogs() } label: { Image(systemName: "doc.text.magnifyingglass").frame(width: 22, height: 20) }
                     .help("Open logs")
             }
@@ -109,13 +137,41 @@ struct ManageView: View {
                 .padding(.top, 22)
         } else {
             ContentUnavailableView {
-                Label(saved.isEmpty ? "No Tunnels Yet" : "No Tunnel Selected", systemImage: "shield")
+                Label(saved.isEmpty ? String(localized: "No Tunnels Yet") : String(localized: "No Tunnel Selected"), systemImage: "shield")
             } description: {
-                Text("WireGuard, AmneziaWG, OpenVPN, VLESS, Trojan, Hysteria 2, or a Cisco, Fortinet, "
-                     + "GlobalProtect or other OpenConnect server.")
+                Text("Add a configuration file, a share link or a corporate VPN server.")
             } actions: {
-                Button("Add Tunnel…") { adding = true }
+                Button("Add Tunnel…") { selection.adding = true }
                     .buttonStyle(.borderedProminent)
+                Text("or drop a .conf or .ovpn file on this window")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func importDropped(_ providers: [NSItemProvider]) {
+        final class Collected: @unchecked Sendable {
+            let lock = NSLock()
+            var urls: [URL] = []
+        }
+        let collected = Collected()
+        let group = DispatchGroup()
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url { collected.lock.withLock { collected.urls.append(url) } }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            let urls = collected.lock.withLock { collected.urls }
+            guard !urls.isEmpty else { return }
+            let result = model.importFiles(urls)
+            if let first = result.names.first { selection.name = first }
+            if !result.errors.isEmpty {
+                Alerts.show(result.names.isEmpty ? String(localized: "Could not import") : String(localized: "Some files were not imported"),
+                            result.errors.joined(separator: "\n"))
             }
         }
     }
@@ -136,22 +192,32 @@ struct SidebarMaterial: NSViewRepresentable {
 
 struct TunnelListRow: View {
     let row: AppModel.Row
-    let busy: Bool
-
-    private var dot: Color {
-        if busy { return .orange }
-        guard let status = row.status else { return .clear }
-        return status.connected ? .green : .orange
-    }
+    let phase: TunnelPhase
 
     var body: some View {
-        HStack(spacing: 8) {
-            KindTile(kind: row.brand, size: 18, shadow: false)
-            Text(row.name).lineLimit(1)
-            Spacer()
-            Circle().fill(dot).frame(width: 7, height: 7)
+        HStack(spacing: 9) {
+            KindTile(kind: row.brand, size: 20, shadow: false)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.name).lineLimit(1)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(subtitle(now: context.date))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            if let color = phase.color {
+                Circle().fill(color).frame(width: 7, height: 7)
+            }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
+    }
+
+    private func subtitle(now: Date) -> String {
+        guard phase == .connected, let status = row.status else { return phase.title }
+        return String(localized: "Connected · \(Format.uptime(since: status.startedAt, now: now))")
     }
 }
 
@@ -179,7 +245,7 @@ struct ConfigSummary {
             dns = (c.dnsServers.map(\.description) + c.dnsSearchDomains).joined(separator: ", ")
             servers = c.peers.compactMap { $0.endpoint?.description }.joined(separator: ", ")
             routes = c.peers.flatMap(\.allowedIPs).map(\.description).joined(separator: ", ")
-            mtu = c.mtu.map(String.init) ?? "Automatic"
+            mtu = c.mtu.map(String.init) ?? String(localized: "Automatic")
             parameters = c.deviceParameters.map { p in
                 (p.name, p.isSecret ? "••••••••" : (p.value.count > 28 ? "\(p.value.prefix(24))…" : p.value))
             }
@@ -187,18 +253,18 @@ struct ConfigSummary {
         case .openvpn:
             guard let c = try? OpenVPNConfig.parse(text) else { return }
             servers = c.remotes.joined(separator: ", ")
-            routes = c.redirectsGateway ? "All traffic (redirect-gateway)" : "Pushed by the server"
+            routes = c.redirectsGateway ? String(localized: "All traffic (redirect-gateway)") : String(localized: "Pushed by the server")
             needsLogin = c.needsUsernamePassword
             var login: [String] = []
-            login.append(c.needsUsernamePassword ? "Username and password" : "Certificate")
-            if c.staticChallenge != nil { login.append("one-time code") }
-            if c.hasEncryptedPrivateKey { login.append("key passphrase") }
+            login.append(c.needsUsernamePassword ? String(localized: "Username and password") : String(localized: "Certificate"))
+            if c.staticChallenge != nil { login.append(String(localized: "one-time code")) }
+            if c.hasEncryptedPrivateKey { login.append(String(localized: "key passphrase")) }
             self.login = login.joined(separator: " + ")
         case .openconnect:
             guard let c = try? OpenConnectConfig.parse(text) else { return }
             servers = c.url
-            routes = "Pushed by the server"
-            dns = "Pushed by the server"
+            routes = String(localized: "Pushed by the server")
+            dns = String(localized: "Pushed by the server")
             needsLogin = true
             var p: [(name: String, value: String)] = [("Type", c.vpnProtocol.displayName)]
             if let user = c.username { p.append(("Username", user)) }
@@ -207,36 +273,47 @@ struct ConfigSummary {
             if c.certificate != nil { p.append(("Client certificate", "embedded")) }
             if c.disableDTLS { p.append(("DTLS", "off")) }
             parameters = p
-            login = "Asked when connecting (forms, one-time codes, SSO)"
+            login = String(localized: "Asked when connecting (forms, one-time codes, SSO)")
         case .vless, .trojan, .hysteria2:
             guard let link = try? ProxyLink.parse(text) else { return }
             servers = link.endpoint
-            dns = ProxyLink.defaultDNS.joined(separator: ", ") + " (Bridge default)"
-            routes = "All traffic (IPv6 when the server supports it)"
+            dns = ProxyLink.defaultDNS.joined(separator: ", ") + String(localized: " (Bridge default)")
+            routes = String(localized: "All traffic (IPv6 when the server supports it)")
             parameters = link.summary
         }
     }
 }
 
+
+/// Details and settings of one tunnel. Settings are saved as soon as they change (text
+/// fields when you leave them); a connected tunnel then offers to reconnect.
 struct TunnelDetail: View {
     let name: String
     @EnvironmentObject var model: AppModel
+
+    private enum Field: Hashable { case networks, dns, domains, username, password }
 
     @State private var summary: ConfigSummary?
     @State private var configText = ""
     @State private var saved = TunnelSettings()
     @State private var settings = TunnelSettings()
+    @State private var loaded = false
     @State private var networksText = ""
     @State private var dnsText = ""
     @State private var domainsText = ""
+    @State private var networksError: String?
+    @State private var dnsError: String?
+    @State private var domainsError: String?
     @State private var username = ""
     @State private var password = ""
     @State private var hasSavedLogin = false
+    @State private var loginSaved = false
     @State private var error: String?
     @State private var editing = false
     @State private var renaming = false
     @State private var newName = ""
-    @State private var loginSaved = false
+    @State private var killSwitchInfo = false
+    @FocusState private var focus: Field?
 
     private var row: AppModel.Row? { model.rows.first { $0.name == name } }
     private var busy: Bool { model.busy.contains(name) }
@@ -248,10 +325,9 @@ struct TunnelDetail: View {
         s.splitDNSDomains = Self.split(domainsText)
         if s.routing == .config || s.routing == .allTraffic { s.networks = [] }
         if s.dnsMode != .custom { s.dnsServers = [] }
+        if s.dnsMode == .system { s.splitDNSDomains = [] }
         return s
     }
-
-    private var dirty: Bool { draft != saved }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -261,18 +337,9 @@ struct TunnelDetail: View {
             Divider()
             form
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if dirty {
-                    Button("Revert") { load() }
-                    Button("Save") { save() }
-                        .keyboardShortcut("s", modifiers: .command)
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-        }
         .sheet(isPresented: $editing) {
-            ConfigEditor(name: name, text: configText) { load() }
+            ConfigEditor(name: name, kind: summary?.kind ?? row?.kind ?? .wireguard,
+                         brand: row?.brand ?? .wireguard, text: configText) { load() }
         }
         .alert("Rename Tunnel", isPresented: $renaming) {
             TextField("Name", text: $newName)
@@ -282,10 +349,23 @@ struct TunnelDetail: View {
             Text("Letters, digits, “-”, “_” and “.”")
         }
         .onAppear(perform: load)
+        .onDisappear {
+            commit()
+            saveLogin()
+        }
+        .onChange(of: settings) { _, _ in commit() }
+        .onChange(of: focus) { old, _ in
+            switch old {
+            case .username?, .password?: saveLogin()
+            case .some: commit()
+            case nil: break
+            }
+        }
     }
 
     private var form: some View {
         Form {
+            if model.needsReconnect(name) { reconnectBanner }
             if let status = row?.status { statusSection(status) }
             configurationSection
             if summary?.needsLogin == true { loginSection }
@@ -294,7 +374,7 @@ struct TunnelDetail: View {
             if let error {
                 Section {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.red)
                         .textSelection(.enabled)
                 }
             }
@@ -305,61 +385,81 @@ struct TunnelDetail: View {
     // MARK: Sections
 
     private var header: some View {
-            HStack(spacing: 12) {
-                KindTile(kind: row?.brand ?? AddTunnelKind(summary?.kind ?? .wireguard), size: 36)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name).font(.title3.weight(.semibold))
-                    Text(stateText).font(.callout).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Menu {
-                    Button("Rename…") {
-                        newName = name
-                        renaming = true
-                    }
-                    .disabled(row?.status != nil)
-                    Button("Edit Configuration…") { editing = true }
-                    Button("Show in Finder") { model.reveal(name) }
-                    Divider()
-                    Button("Remove…", role: .destructive) { model.remove(name) }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                if busy {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Toggle("", isOn: Binding(get: { row?.status != nil }, set: { _ in model.toggle(name) }))
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .disabled(!model.helperReady)
-                }
+        HStack(spacing: 12) {
+            KindTile(kind: row?.brand ?? AddTunnelKind(summary?.kind ?? .wireguard), size: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).font(.title3.weight(.semibold))
+                Text(stateText).font(.callout).foregroundStyle(.secondary)
             }
+            Spacer()
+            Menu {
+                Button("Rename…") {
+                    newName = name
+                    renaming = true
+                }
+                .disabled(row?.status != nil)
+                Button("Edit Configuration…") { editing = true }
+                Button("Show in Finder") { model.reveal(name) }
+                Divider()
+                Button("Remove…", role: .destructive) { model.remove(name) }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(row?.status != nil ? String(localized: "Disconnect to rename the tunnel") : String(localized: "More actions"))
+            if busy {
+                ProgressView().controlSize(.small)
+            } else {
+                Toggle("", isOn: Binding(get: { row?.status != nil }, set: { _ in model.toggle(name) }))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+        }
     }
 
     private var stateText: String {
         let kind = (summary?.kind ?? row?.kind)?.displayName ?? ""
-        if busy { return "\(kind) · \(row?.status == nil ? "Connecting…" : "Disconnecting…")" }
-        guard let status = row?.status else { return "\(kind) · Disconnected" }
-        return "\(kind) · \(status.state)"
+        let phase = row.map(model.phase(of:)) ?? .off
+        return "\(kind) · \(phase.title)"
+    }
+
+    private var reconnectBanner: some View {
+        Section {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .foregroundStyle(.tint)
+                    .font(.title3)
+                Text("Settings changed — reconnect “\(name)” to apply them.")
+                Spacer()
+                Button("Reconnect") { model.reconnect(name) }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
     }
 
     private func statusSection(_ status: TunnelStatus) -> some View {
         Section("Status") {
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                LabeledContent("Connected for", value: uptime(status.startedAt, now: context.date))
+                LabeledContent("Connected for", value: Format.uptime(since: status.startedAt, now: context.date))
+                    .monospacedDigit()
             }
-            if let server = status.server { LabeledContent("Server", value: server) }
-            if !status.interface.isEmpty { LabeledContent("Interface", value: status.interface) }
-            if !status.addresses.isEmpty { LabeledContent("Addresses", value: status.addresses.joined(separator: ", ")) }
-            if !status.dnsServers.isEmpty { LabeledContent("DNS", value: status.dnsServers.joined(separator: ", ")) }
+            if let rate = model.rates[name] {
+                LabeledContent("Speed", value: "↓ \(Format.rate(rate.rx)) · ↑ \(Format.rate(rate.tx))")
+                    .monospacedDigit()
+            }
+            LabeledContent("Total", value: "↓ \(Format.bytes(status.rxBytes)) · ↑ \(Format.bytes(status.txBytes))")
+                .monospacedDigit()
+            if !status.addresses.isEmpty {
+                LabeledContent(status.addresses.count == 1 ? String(localized: "Address") : String(localized: "Addresses"),
+                               value: status.addresses.joined(separator: ", "))
+                    .textSelection(.enabled)
+            }
             if status.kind != .openvpn && status.kind != .openconnect {
-                LabeledContent(status.kind.usesXray ? "Last check" : "Last handshake",
-                               value: status.lastHandshake.map { ago($0) } ?? "Never")
+                LabeledContent(status.kind.usesXray ? String(localized: "Last check") : String(localized: "Last handshake"),
+                               value: status.lastHandshake.map { Format.ago($0) } ?? String(localized: "Never"))
             }
-            LabeledContent("Traffic", value: "↓ \(bytes(status.rxBytes))   ↑ \(bytes(status.txBytes))")
             ForEach(status.warnings, id: \.self) { warning in
                 Label(warning, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
             }
@@ -369,14 +469,14 @@ struct TunnelDetail: View {
     private var configurationSection: some View {
         Section {
             if let s = summary {
-                if !s.servers.isEmpty { LabeledContent("Server", value: s.servers) }
-                if !s.addresses.isEmpty { LabeledContent("Addresses", value: s.addresses) }
+                if !s.servers.isEmpty { LabeledContent("Server", value: s.servers).textSelection(.enabled) }
+                if !s.addresses.isEmpty { LabeledContent(String(localized: "Addresses"), value: s.addresses) }
                 if !s.dns.isEmpty { LabeledContent("DNS", value: s.dns) }
                 if !s.routes.isEmpty { LabeledContent("Routes", value: s.routes) }
                 if s.kind != .openvpn && s.kind != .openconnect && !s.kind.usesXray { LabeledContent("MTU", value: s.mtu) }
                 if !s.parameters.isEmpty {
-                    DisclosureGroup(s.kind.usesXray || s.kind == .openconnect ? "\(s.kind.displayName) settings (\(s.parameters.count))"
-                                    : "AmneziaWG parameters (\(s.parameters.count))") {
+                    DisclosureGroup(s.kind.usesXray || s.kind == .openconnect ? String(localized: "\(s.kind.displayName) settings (\(s.parameters.count))")
+                                    : String(localized: "\(s.kind.displayName) parameters (\(s.parameters.count))")) {
                         ForEach(s.parameters, id: \.name) { p in
                             LabeledContent(p.name) { Text(p.value).font(.callout.monospaced()) }
                         }
@@ -398,32 +498,26 @@ struct TunnelDetail: View {
     private var loginSection: some View {
         Section {
             TextField("Username", text: $username)
+                .focused($focus, equals: .username)
+                .onSubmit(saveLogin)
             SecureField("Password", text: $password,
-                        prompt: Text(hasSavedLogin ? "Saved in Keychain — type to replace" : "Password"))
-            HStack {
-                if hasSavedLogin {
-                    Button("Forget") {
-                        Keychain.deleteCredentials(for: name)
-                        username = ""
-                        password = ""
-                        hasSavedLogin = false
-                    }
+                        prompt: Text(hasSavedLogin ? String(localized: "Saved in Keychain") : String(localized: "Asked when connecting")))
+                .focused($focus, equals: .password)
+                .onSubmit(saveLogin)
+            if hasSavedLogin {
+                HStack {
+                    Text(loginSaved ? String(localized: "Saved to your login keychain.") : String(localized: "Stored in your login keychain."))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Forget Password…") { forgetLogin() }
+                        .buttonStyle(.link)
                 }
-                Spacer()
-                if loginSaved { Text("Saved").foregroundStyle(.secondary).font(.callout) }
-                Button("Save to Keychain") {
-                    do {
-                        try Keychain.saveCredentials(username: username, password: password, for: name)
-                        hasSavedLogin = true
-                        loginSaved = true
-                    } catch { self.error = "\(error)" }
-                }
-                .disabled(username.isEmpty || password.isEmpty)
             }
         } header: {
             Text("Sign-in")
         } footer: {
-            Text("Stored in your login keychain. Leave empty to be asked when connecting.")
+            Text("Type a password to save it. Leave it empty to be asked when connecting.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -431,103 +525,129 @@ struct TunnelDetail: View {
 
     private var routingSection: some View {
         Section {
-            Picker("Send through VPN", selection: $settings.routing) {
-                Text("As in configuration").tag(TunnelSettings.Routing.config)
-                Text("All traffic").tag(TunnelSettings.Routing.allTraffic)
-                Text("Only these networks").tag(TunnelSettings.Routing.onlyListed)
-                Text("All traffic except these networks").tag(TunnelSettings.Routing.allExceptListed)
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Send through VPN", selection: $settings.routing) {
+                    Text("As in configuration").tag(TunnelSettings.Routing.config)
+                    Text("All traffic").tag(TunnelSettings.Routing.allTraffic)
+                    Text("Only these networks").tag(TunnelSettings.Routing.onlyListed)
+                    Text("All traffic except these networks").tag(TunnelSettings.Routing.allExceptListed)
+                }
+                Text(routingHint).font(.caption).foregroundStyle(.secondary)
             }
             if settings.routing == .onlyListed || settings.routing == .allExceptListed {
-                TextField("Networks", text: $networksText, prompt: Text("10.0.0.0/8, 192.168.50.0/24, 203.0.113.7"),
-                          axis: .vertical)
-                    .lineLimit(2...6)
-                    .font(.body.monospaced())
+                VStack(alignment: .leading, spacing: 4) {
+                    TextField("Networks", text: $networksText, prompt: Text("10.0.0.0/8, 192.168.50.0/24, 203.0.113.7"),
+                              axis: .vertical)
+                        .lineLimit(2...6)
+                        .font(.body.monospaced())
+                        .focused($focus, equals: .networks)
+                        .onSubmit(commit)
+                    fieldError(networksError)
+                }
             }
             Toggle("Keep local networks off the VPN", isOn: $settings.excludeLocalNetworks)
-            Toggle("Kill switch", isOn: $settings.killSwitch)
+            Toggle(isOn: $settings.killSwitch) {
+                HStack(spacing: 4) {
+                    Text("Kill switch")
+                    Button { killSwitchInfo = true } label: { Image(systemName: "info.circle") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("About the kill switch")
+                        .popover(isPresented: $killSwitchInfo, arrowEdge: .bottom) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Kill switch").font(.headline)
+                                Text("While connected, only the VPN, its server and your local network are reachable. If the tunnel drops, traffic stays blocked until you reconnect or choose Unblock Internet in the menu.")
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(14)
+                            .frame(width: 300)
+                        }
+                }
+            }
             if summary?.kind.usesXray == true { profilePicker }
         } header: {
             Text("Routing")
-        } footer: {
-            Text(routingFooter).font(.caption).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var profilePicker: some View {
-        HStack {
-            Picker("Routing profile", selection: $settings.routingProfile) {
-                Text("None").tag(String?.none)
-                ForEach(model.routingProfiles, id: \.self) { Text($0).tag(Optional($0)) }
-            }
-            Menu {
-                Button("Import from File…") { model.importRoutingProfile(fromClipboard: false) { settings.routingProfile = $0 } }
-                Button("Paste from Clipboard") { model.importRoutingProfile(fromClipboard: true) { settings.routingProfile = $0 } }
-                if let profile = settings.routingProfile {
-                    Divider()
-                    Button("Update “\(profile)”") { model.updateRoutingProfile(profile) }
-                    Button("Remove “\(profile)”…", role: .destructive) {
-                        if model.removeRoutingProfile(profile) {
-                            settings.routingProfile = nil
-                            saved.routingProfile = nil
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Picker("Routing profile", selection: $settings.routingProfile) {
+                    Text("None").tag(String?.none)
+                    ForEach(model.routingProfiles, id: \.self) { Text($0).tag(Optional($0)) }
                 }
-            } label: {
-                Image(systemName: "ellipsis.circle")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Import, update or remove routing profiles (routing.json, happ://routing links)")
+            HStack(spacing: 4) {
+                Text("Decides per site what goes through the VPN, direct or blocked.")
+                Button("Manage Profiles…") { SettingsWindow.show(model: model, tab: .profiles) }
+                    .buttonStyle(.link)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 
-    private var routingFooter: String {
-        let base: String
+    private var routingHint: String {
         switch settings.routing {
         case .config:
             switch summary?.kind {
-            case .openvpn: base = "Uses the routes the OpenVPN server pushes."
-            case .openconnect: base = "Uses the routes the OpenConnect server pushes (split include / exclude)."
-            case .vless, .trojan, .hysteria2: base = "All traffic. IPv6 goes through the tunnel when the server can reach IPv6, otherwise it is blocked."
-            default: base = "Uses AllowedIPs from the configuration."
+            case .openvpn, .openconnect: String(localized: "Uses the routes the server pushes.")
+            case .vless, .trojan, .hysteria2: String(localized: "All traffic; IPv6 too when the server can reach it.")
+            default: String(localized: "Uses AllowedIPs from the configuration.")
             }
-        case .allTraffic: base = "Everything goes through the tunnel."
-        case .onlyListed: base = "Split tunnelling: only these networks use the VPN, everything else goes direct."
-        case .allExceptListed: base = "These networks go direct, everything else uses the VPN."
+        case .allTraffic: String(localized: "Everything goes through the VPN.")
+        case .onlyListed: String(localized: "Only these networks use the VPN; everything else goes direct.")
+        case .allExceptListed: String(localized: "These networks go direct; everything else uses the VPN.")
         }
-        var text = base
-        if let profile = settings.routingProfile {
-            text += " Routing profile “\(profile)” decides per site and network what goes through the VPN, direct "
-                + "or is blocked, and answers DNS; DNS settings below don't apply."
-        }
-        guard settings.killSwitch else { return text }
-        return text + " Kill switch: while connected, only the VPN, its server and your local network are reachable; "
-            + "if the tunnel drops, traffic stays blocked until you reconnect or unblock it from the menu."
     }
 
-    private var dnsSection: some View {
-        Section {
-            Picker("DNS servers", selection: $settings.dnsMode) {
-                Text("From configuration").tag(TunnelSettings.DNSMode.config)
-                Text("Custom").tag(TunnelSettings.DNSMode.custom)
-                Text("Don't change system DNS").tag(TunnelSettings.DNSMode.system)
+    @ViewBuilder private var dnsSection: some View {
+        if settings.routingProfile != nil {
+            Section("DNS") {
+                LabeledContent("DNS servers", value: "Answered by the routing profile")
             }
-            if settings.dnsMode == .custom {
-                TextField("Servers", text: $dnsText, prompt: Text("1.1.1.1, 9.9.9.9"))
-                    .font(.body.monospaced())
+            .foregroundStyle(.secondary)
+        } else {
+            Section {
+                Picker("DNS servers", selection: $settings.dnsMode) {
+                    Text("From configuration").tag(TunnelSettings.DNSMode.config)
+                    Text("Custom").tag(TunnelSettings.DNSMode.custom)
+                    Text("Don't change system DNS").tag(TunnelSettings.DNSMode.system)
+                }
+                if settings.dnsMode == .custom {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("Servers", text: $dnsText, prompt: Text("1.1.1.1, 9.9.9.9"))
+                            .font(.body.monospaced())
+                            .focused($focus, equals: .dns)
+                            .onSubmit(commit)
+                        fieldError(dnsError)
+                    }
+                }
+                if settings.dnsMode != .system {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("Only for domains", text: $domainsText, prompt: Text("corp.example, internal.lan"))
+                            .font(.body.monospaced())
+                            .focused($focus, equals: .domains)
+                            .onSubmit(commit)
+                        fieldError(domainsError)
+                    }
+                }
+            } header: {
+                Text("DNS")
+            } footer: {
+                Text("With “Only for domains”, just these domains use the VPN's DNS.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if settings.dnsMode != .system {
-                TextField("Only for domains", text: $domainsText, prompt: Text("corp.example, internal.lan"))
-                    .font(.body.monospaced())
-            }
-        } header: {
-            Text("DNS")
-        } footer: {
-            Text("“Only for domains” is split DNS: the VPN's DNS answers just these domains, the rest uses your normal DNS.")
-                .font(.caption).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private func fieldError(_ message: String?) -> some View {
+        if let message {
+            Label("\(message). Not saved.", systemImage: "exclamationmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
         }
     }
 
@@ -543,28 +663,86 @@ struct TunnelDetail: View {
         networksText = saved.networks.joined(separator: ", ")
         dnsText = saved.dnsServers.joined(separator: ", ")
         domainsText = saved.splitDNSDomains.joined(separator: ", ")
+        networksError = nil
+        dnsError = nil
+        domainsError = nil
         // Never read the password here: that would show a Keychain prompt every time
         // the window opens. Only connecting needs it.
         hasSavedLogin = Keychain.hasCredentials(for: name)
         username = Keychain.savedUsername(for: name) ?? ""
         password = ""
+        self.loaded = true
     }
 
-    private func save() {
+    /// Validates the draft and saves it; an invalid field is marked and nothing is saved.
+    private func commit() {
+        guard loaded else { return }
         let next = draft
+        networksError = Self.problem(next, .networks)
+        dnsError = Self.problem(next, .dns)
+        domainsError = Self.problem(next, .domains)
+        guard networksError == nil, dnsError == nil, domainsError == nil, next != saved else { return }
         do {
             try TunnelLibrary.saveSettings(next, for: name)
+            saved = next
+            error = nil
+            model.objectWillChange.send()  // the reconnect banner depends on the saved settings
         } catch {
             self.error = "\(error)"
-            return
         }
-        error = nil
-        saved = next
-        settings = next
-        if model.isActive(name),
-           Alerts.confirm("Reconnect “\(name)”?", "New settings apply after reconnecting.", button: "Reconnect") {
-            model.reconnect(name)
+    }
+
+    /// The validation message for one group of fields, checked on its own.
+    private static func problem(_ settings: TunnelSettings, _ field: Field) -> String? {
+        var s = settings
+        switch field {
+        case .networks:
+            s.dnsMode = .config
+            s.dnsServers = []
+            s.splitDNSDomains = []
+        case .dns:
+            s.routing = .config
+            s.networks = []
+            s.splitDNSDomains = []
+        case .domains:
+            s.routing = .config
+            s.networks = []
+            s.dnsMode = .config
+            s.dnsServers = []
+        case .username, .password:
+            return nil
         }
+        do {
+            try s.validate()
+            return nil
+        } catch let error as ConfigError {
+            return error.message
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    private func saveLogin() {
+        let user = username.trimmingCharacters(in: .whitespaces)
+        guard !user.isEmpty, !password.isEmpty else { return }
+        do {
+            try Keychain.saveCredentials(username: user, password: password, for: name)
+            password = ""
+            hasSavedLogin = true
+            loginSaved = true
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    private func forgetLogin() {
+        guard Alerts.confirm(String(localized: "Forget the password for “\(name)”?"),
+                             String(localized: "Bridge will ask for it the next time you connect."), button: String(localized: "Forget"), destructive: true) else { return }
+        Keychain.deleteCredentials(for: name)
+        username = ""
+        password = ""
+        hasSavedLogin = false
+        loginSaved = false
     }
 
     private func rename() {
@@ -579,27 +757,10 @@ struct TunnelDetail: View {
         }
     }
 
-    // MARK: Formatting
-
     static func split(_ text: String) -> [String] {
         text.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == " " || $0 == ";" })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-    }
-
-    private func uptime(_ since: Date, now: Date) -> String {
-        let s = max(0, Int(now.timeIntervalSince(since)))
-        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
-            : String(format: "%02d:%02d", s / 60, s % 60)
-    }
-
-    private func ago(_ date: Date) -> String {
-        let s = max(0, Int(Date().timeIntervalSince(date)))
-        return s < 60 ? "\(s) s ago" : "\(s / 60) min ago"
-    }
-
-    private func bytes(_ count: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(clamping: count), countStyle: .binary)
     }
 }
 
@@ -607,20 +768,42 @@ struct TunnelDetail: View {
 
 struct ConfigEditor: View {
     let name: String
+    let kind: TunnelKind
+    let brand: AddTunnelKind
     @State var text: String
     let onSave: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var error: String?
 
-    init(name: String, text: String, onSave: @escaping () -> Void) {
+    init(name: String, kind: TunnelKind, brand: AddTunnelKind, text: String, onSave: @escaping () -> Void) {
         self.name = name
+        self.kind = kind
+        self.brand = brand
         _text = State(initialValue: text)
         self.onSave = onSave
     }
 
+    /// Checks the text as the matching parser would when connecting.
+    private var validation: (ok: Bool, message: String) {
+        do {
+            switch kind {
+            case .amneziawg, .wireguard: _ = try TunnelConfig.parse(text)
+            case .openvpn: _ = try OpenVPNConfig.parse(text)
+            case .openconnect: _ = try OpenConnectConfig.parse(text)
+            case .vless, .trojan, .hysteria2: _ = try ProxyLink.parse(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return (true, String(localized: "Valid \(kind.displayName) configuration"))
+        } catch {
+            return (false, "\(error)")
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Edit “\(name)”").font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                KindTile(kind: brand, size: 20, shadow: false)
+                Text("Edit “\(name)”").font(.headline)
+            }
             TextEditor(text: $text)
                 .font(.system(size: 12, design: .monospaced))
                 .autocorrectionDisabled()
@@ -630,12 +813,20 @@ struct ConfigEditor: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.25)))
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.red)
                     .font(.callout)
                     .textSelection(.enabled)
             }
-            HStack {
-                Text("Changes apply the next time you connect.").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                let check = validation
+                Label {
+                    Text(check.message).lineLimit(1).truncationMode(.tail)
+                } icon: {
+                    Image(systemName: check.ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(check.ok ? .green : .red)
+                }
+                .font(.callout)
+                Text("Applies the next time you connect.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -650,9 +841,10 @@ struct ConfigEditor: View {
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .buttonStyle(.borderedProminent)
+                .disabled(!check.ok)
             }
         }
-        .padding(16)
-        .frame(minWidth: 640, minHeight: 460)
+        .padding(20)
+        .frame(minWidth: 660, minHeight: 480)
     }
 }

@@ -61,6 +61,8 @@ cp "$PRODUCTS/BridgeApp" "$APP/Contents/MacOS/Bridge"
 cp "$BIN"/* "$APP/Contents/Resources/"
 install -m 755 "$ROOT/scripts/install-helper.sh" "$APP/Contents/Resources/install-helper.sh"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# Localizations: English (development language), Russian, German; macOS picks by system language.
+cp -R "$ROOT/Resources/"*.lproj "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,6 +79,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>ru</string><string>de</string></array>
   <key>BridgeUpdateRepository</key><string>rtmo0/vpn-tunnel-bridge</string>
   <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Andrey Samarin. MIT License.</string>
 </dict>
@@ -84,7 +88,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 for f in "$APP/Contents/Resources"/*; do
-  [ -x "$f" ] && [ "${f##*.}" != "sh" ] || continue
+  [ -f "$f" ] && [ -x "$f" ] && [ "${f##*.}" != "sh" ] || continue
   case "$(basename "$f")" in
     bridge-helper|bridge) codesign --force --options runtime --sign - "$f" ;;
     *) codesign --force --sign - "$f" 2>/dev/null ;;
@@ -95,7 +99,7 @@ codesign --verify "$APP"
 
 echo "==> Done"
 for f in "$APP/Contents/MacOS/Bridge" "$APP/Contents/Resources"/*; do
-  case "${f##*.}" in sh|icns) continue;; esac
+  case "${f##*.}" in sh|icns|lproj) continue;; esac
   echo "    $(basename "$f"): $(lipo -archs "$f")"
 done
 echo "Run it: open \"$APP\""

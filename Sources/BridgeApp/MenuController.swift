@@ -2,8 +2,8 @@ import AppKit
 import BridgeClient
 import BridgeCore
 
-/// The status item and its native menu, in the spirit of the WireGuard and
-/// Shimo menus: status on top, tunnels you click to connect, then actions.
+/// The status item and its native menu: status on top, then anything the user
+/// has to act on, then the tunnels you click to connect, then the windows.
 final class MenuController: NSObject, NSMenuDelegate {
     private let model: AppModel
     private let updater = Updater()
@@ -21,9 +21,12 @@ final class MenuController: NSObject, NSMenuDelegate {
     private var detailItems: [String: NSMenuItem] = [:]
     private var busyItems: [NSMenuItem] = []
 
+    /// Where the right-hand column (state word and dot) of a tunnel item starts.
+    private static let rightColumn: CGFloat = 250
+
     /// Everything that changes which items exist (as opposed to their text).
     private var structure: String {
-        let rows = model.rows.map { "\($0.name)|\($0.kind)|\($0.saved)|\($0.status?.connected ?? false)|\($0.status != nil)" }
+        let rows = model.rows.map { "\($0.name)|\($0.kind)|\($0.saved)|\(model.phase(of: $0))" }
         let holds = model.killSwitchHolds.joined(separator: ",")
         let update: String
         switch updater.state {
@@ -32,7 +35,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         case .downloading: update = "downloading"
         case .installing: update = "installing"
         }
-        return "\(rows)|\(model.busy.sorted())|\(model.helper)|\(model.installing)|\(update)|\(holds)"
+        let details = UserDefaults.standard.bool(forKey: Preferences.showMenuDetails)
+        return "\(rows)|\(model.helper)|\(model.installing)|\(update)|\(holds)|\(details)"
     }
 
     init(model: AppModel) {
@@ -41,6 +45,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
+        SettingsWindow.updater = updater
         model.onChange = { [weak self] in self?.update() }
         updater.onChange = { [weak self] in self?.update() }
         update()
@@ -58,8 +63,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         updateIcon()
         let structure = self.structure
         if menuIsOpen && structure == lastStructure {
-            // Only refresh text so open submenus stay open.
-            statusLineItem?.title = statusLine
+            // Only refresh text so the open menu does not jump.
+            if let item = statusLineItem { applyStatus(to: item) }
             updateItem?.title = updateTitle
             for row in model.rows {
                 if let item = detailItems[row.name], let status = row.status {
@@ -112,53 +117,24 @@ final class MenuController: NSObject, NSMenuDelegate {
         detailItems.removeAll()
         busyItems.removeAll()
 
-        let status = info(statusLine)
+        let status = info("")
+        applyStatus(to: status)
         statusLineItem = status
         menu.addItem(status)
 
-        if !model.killSwitchHolds.isEmpty {
-            let item = action("Unblock Internet (Kill Switch)", #selector(releaseKillSwitch))
-            item.image = NSImage(systemSymbolName: "exclamationmark.shield.fill", accessibilityDescription: nil)
-            menu.addItem(item)
-        }
-
-        updateItem = nil
-        switch updater.state {
-        case .idle, .checking:
-            break
-        case .available:
-            let item = action(updateTitle, #selector(installUpdate))
-            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
-            updateItem = item
-            menu.addItem(item)
-        case .downloading, .installing:
-            let item = info(updateTitle)
-            updateItem = item
-            menu.addItem(item)
-        }
-        if model.connectedRows.count == 1, let status = model.connectedRows.first?.status, !status.addresses.isEmpty {
-            menu.addItem(info("Addresses: \(status.addresses.joined(separator: ", "))"))
-        }
-
-        switch model.helper {
-        case .ready:
-            break
-        case .notInstalled, .outdated:
+        let actions = actionItems()
+        if !actions.isEmpty {
             menu.addItem(.separator())
-            let title = model.installing ? "Installing Helper…"
-                : (model.helper == .notInstalled ? "Install Helper…" : "Update Helper…")
-            let item = action(title, #selector(installHelper))
-            item.isEnabled = !model.installing
-            menu.addItem(item)
+            actions.forEach(menu.addItem)
         }
 
         menu.addItem(.separator())
         if model.rows.isEmpty {
-            menu.addItem(info("No tunnels"))
+            menu.addItem(info(String(localized: "No tunnels yet")))
         }
         for row in model.rows {
             menu.addItem(tunnelItem(row))
-            if let status = row.status, status.connected {
+            if let status = row.status, status.connected, UserDefaults.standard.bool(forKey: Preferences.showMenuDetails) {
                 let detail = detailItem(row, status)
                 detailItems[row.name] = detail
                 menu.addItem(detail)
@@ -167,58 +143,136 @@ final class MenuController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         if model.rows.contains(where: { $0.status != nil }) {
-            menu.addItem(action("Disconnect All", #selector(disconnectAll)))
+            menu.addItem(action(String(localized: "Disconnect All"), #selector(disconnectAll)))
         }
-        menu.addItem(action("Manage Tunnels…", #selector(manageTunnels), key: ","))
+        menu.addItem(action(String(localized: "Manage Tunnels…"), #selector(manageTunnels)))
+        menu.addItem(action(String(localized: "Settings…"), #selector(openSettings), key: ","))
 
         menu.addItem(.separator())
-        menu.addItem(action("Check for Updates…", #selector(checkUpdates)))
-        menu.addItem(action("About Bridge", #selector(about)))
-        menu.addItem(action("Quit Bridge", #selector(quit), key: "q"))
+        menu.addItem(action(String(localized: "Quit Bridge"), #selector(quit), key: "q"))
     }
 
-    private var statusLine: String {
-        let connected = model.connectedRows
-        if !model.busy.isEmpty { return "Status: Connecting…" }
-        if !model.killSwitchHolds.isEmpty && connected.isEmpty {
-            return "Status: Kill switch is blocking traffic (\(model.killSwitchHolds.joined(separator: ", ")) dropped)"
+    /// The things the user has to act on, each with a coloured symbol. Empty when all is well.
+    private func actionItems() -> [NSMenuItem] {
+        var items: [NSMenuItem] = []
+        if !model.killSwitchHolds.isEmpty {
+            items.append(action(String(localized: "Unblock Internet"), #selector(releaseKillSwitch),
+                                symbol: "exclamationmark.shield.fill", color: Theme.critical))
         }
-        if connected.count == 1 { return "Status: Connected — \(connected[0].name)" }
-        if connected.count > 1 { return "Status: \(connected.count) tunnels connected" }
-        if model.rows.contains(where: { $0.status != nil }) { return "Status: Waiting for server…" }
         switch model.helper {
-        case .notInstalled: return "Status: Helper not installed"
-        case .outdated: return "Status: Helper needs an update"
-        case .ready: return "Status: Inactive"
+        case .ready:
+            break
+        case .notInstalled, .outdated:
+            let installed = model.helper != .notInstalled
+            let title = model.installing ? String(localized: "Installing Helper…")
+                : (installed ? String(localized: "Update Helper…") : String(localized: "Install Network Helper…"))
+            let item = action(title, #selector(installHelper),
+                              symbol: installed ? "arrow.triangle.2.circlepath.circle.fill" : "plus.circle.fill",
+                              color: installed ? Theme.busy : Theme.accent)
+            item.isEnabled = !model.installing
+            items.append(item)
+        }
+        updateItem = nil
+        switch updater.state {
+        case .idle, .checking:
+            break
+        case .available:
+            let item = action(updateTitle, #selector(installUpdate), symbol: "arrow.down.circle.fill", color: Theme.accent)
+            updateItem = item
+            items.append(item)
+        case .downloading, .installing:
+            let item = info(updateTitle)
+            updateItem = item
+            items.append(item)
+        }
+        if !model.rows.contains(where: \.saved) {
+            items.append(action(String(localized: "Add Tunnel…"), #selector(addTunnel), symbol: "plus.square", color: .labelColor))
+        }
+        return items
+    }
+
+    private func applyStatus(to item: NSMenuItem) {
+        let (text, alert) = statusLine
+        if alert {
+            item.attributedTitle = NSAttributedString(string: text, attributes: [
+                .font: NSFont.menuFont(ofSize: 0).bold, .foregroundColor: NSColor.labelColor,
+            ])
+            item.image = Self.dot(Theme.critical)
+            item.toolTip = String(localized: "Dropped: \(model.killSwitchHolds.joined(separator: ", "))")
+        } else {
+            item.attributedTitle = NSAttributedString(string: text, attributes: [
+                .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+            item.image = nil
+            item.toolTip = nil
+        }
+    }
+
+    private var statusLine: (text: String, alert: Bool) {
+        let connected = model.connectedRows
+        if !model.killSwitchHolds.isEmpty && connected.isEmpty { return (String(localized: "Kill switch is blocking traffic"), true) }
+        if !model.busy.isEmpty {
+            let connecting = model.rows.contains { model.phase(of: $0) == .connecting }
+            return (connecting ? String(localized: "Connecting…") : String(localized: "Disconnecting…"), false)
+        }
+        if connected.count == 1 { return (String(localized: "Connected — \(connected[0].name)"), false) }
+        if connected.count > 1 { return (String(localized: "\(connected.count) tunnels connected"), false) }
+        if model.rows.contains(where: { $0.status != nil }) { return (String(localized: "Waiting for server…"), false) }
+        switch model.helper {
+        case .notInstalled: return (String(localized: "Set up Bridge to connect"), false)
+        case .outdated: return (String(localized: "The helper needs an update"), false)
+        case .ready: return (String(localized: "Not connected"), false)
         }
     }
 
     private func tunnelItem(_ row: AppModel.Row) -> NSMenuItem {
+        let phase = model.phase(of: row)
         let item = NSMenuItem(title: row.name, action: #selector(toggleTunnel(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = row.name
-        item.image = KindTile.menuImage(row.brand)
-        item.toolTip = row.brand.title
-        if model.busy.contains(row.name) || (row.status != nil && row.status?.connected == false) {
+        item.attributedTitle = tunnelTitle(row.name, phase)
+        item.state = phase == .connected ? .on : .off
+        if phase.isBusy {
             item.image = ProtocolIcon.loading(frame: animationFrame)
             busyItems.append(item)
-            item.state = .off
-        } else if let status = row.status {
-            item.state = status.connected ? .on : .mixed
         } else {
-            item.state = .off
+            item.image = KindTile.menuImage(row.brand)
         }
-        item.isEnabled = model.helperReady && (row.saved || row.status != nil) && !model.busy.contains(row.name)
+        // Without the helper the click still works: connecting offers to install it first.
+        // A tunnel the helper is still bringing up cannot be interrupted yet.
+        item.isEnabled = (row.saved || row.status != nil) && !model.busy.contains(row.name)
+        item.toolTip = phase == .waiting ? String(localized: "Click to disconnect") : row.brand.title
         return item
     }
 
-    /// Grey line under a connected tunnel: uptime and traffic.
+    /// The name, and on the right the state word while busy plus the status dot.
+    private func tunnelTitle(_ name: String, _ phase: TunnelPhase) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: Self.rightColumn)]
+        let text = NSMutableAttributedString(string: name, attributes: [
+            .font: NSFont.menuFont(ofSize: 0), .paragraphStyle: paragraph,
+        ])
+        guard let color = phase.nsColor else { return text }
+        text.append(NSAttributedString(string: "\t"))
+        if phase.isBusy {
+            text.append(NSAttributedString(string: phase.title + "  ", attributes: [
+                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        text.append(NSAttributedString(string: "●", attributes: [
+            .font: NSFont.menuFont(ofSize: 9), .foregroundColor: color, .baselineOffset: 1,
+        ]))
+        return text
+    }
+
+    /// Grey line under a connected tunnel: uptime, speed and address.
     private func detailItem(_ row: AppModel.Row, _ status: TunnelStatus) -> NSMenuItem {
         let item = NSMenuItem()
         item.attributedTitle = detailTitle(row, status)
         item.indentationLevel = 2
         item.isEnabled = false
-        if let server = status.server { item.toolTip = "Server: \(server)" }
+        if let server = status.server { item.toolTip = String(localized: "Server: \(server)") }
         return item
     }
 
@@ -229,44 +283,13 @@ final class MenuController: NSObject, NSMenuDelegate {
         } else {
             parts.append("↓ \(Self.bytes(status.rxBytes))  ↑ \(Self.bytes(status.txBytes))")
         }
-        return NSAttributedString(string: parts.joined(separator: "   "), attributes: [
+        if let address = status.addresses.first {
+            parts.append(address.split(separator: "/").first.map(String.init) ?? address)
+        }
+        return NSAttributedString(string: parts.joined(separator: " · "), attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
             .foregroundColor: NSColor.secondaryLabelColor,
         ])
-    }
-
-    private func manageItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "Manage", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        sub.autoenablesItems = false
-        sub.addItem(action("Open Tunnels Folder", #selector(openFolder)))
-        sub.addItem(action("View Logs", #selector(openLogs)))
-        let saved = model.rows.filter(\.saved)
-        if !saved.isEmpty {
-            sub.addItem(.separator())
-            sub.addItem(namedSubmenu("Show in Finder", saved, #selector(reveal(_:))))
-            let openVPN = saved.filter { $0.kind == .openvpn || $0.kind == .openconnect }
-            if !openVPN.isEmpty { sub.addItem(namedSubmenu("Forget Password", openVPN, #selector(forget(_:)))) }
-            sub.addItem(namedSubmenu("Remove Tunnel", saved, #selector(remove(_:))))
-        }
-        sub.addItem(.separator())
-        sub.addItem(action("Reinstall Helper…", #selector(installHelper)))
-        item.submenu = sub
-        return item
-    }
-
-    private func namedSubmenu(_ title: String, _ rows: [AppModel.Row], _ selector: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for row in rows {
-            let entry = NSMenuItem(title: row.name, action: selector, keyEquivalent: "")
-            entry.target = self
-            entry.representedObject = row.name
-            entry.image = KindTile.menuImage(row.brand)
-            sub.addItem(entry)
-        }
-        item.submenu = sub
-        return item
     }
 
     private func info(_ title: String) -> NSMenuItem {
@@ -275,10 +298,28 @@ final class MenuController: NSObject, NSMenuDelegate {
         return item
     }
 
-    private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
+    private func action(_ title: String, _ selector: Selector, key: String = "",
+                        symbol: String? = nil, color: NSColor? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
+        if let symbol, let color {
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+                .applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(config)
+        }
         return item
+    }
+
+    /// A small filled circle for the status line.
+    private static func dot(_ color: NSColor) -> NSImage {
+        let image = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { _ in
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 3, y: 3, width: 7, height: 7)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     // MARK: Formatting
@@ -294,7 +335,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
 
     private static func rate(_ perSecond: Double) -> String {
-        perSecond < 1 ? "0 KB/s" : ByteCountFormatter.string(fromByteCount: Int64(perSecond), countStyle: .binary) + "/s"
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .binary
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        return formatter.string(fromByteCount: Int64(max(0, perSecond))) + "/s"
     }
 
     // MARK: Actions
@@ -303,14 +347,10 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     @objc private func toggleTunnel(_ sender: Any?) { if let name = name(sender) { model.toggle(name) } }
     @objc private func disconnectAll() { model.disconnectAll() }
-    @objc private func openFolder() { model.openTunnelsFolder() }
-    @objc private func openLogs() { model.openLogs() }
-    @objc private func reveal(_ sender: Any?) { if let name = name(sender) { model.reveal(name) } }
-    @objc private func forget(_ sender: Any?) { if let name = name(sender) { model.forgetPassword(name) } }
-    @objc private func remove(_ sender: Any?) { if let name = name(sender) { model.remove(name) } }
     @objc private func installHelper() { model.installHelper() }
     @objc private func manageTunnels() { ManageWindow.show(model: model) }
-    @objc private func checkUpdates() { updater.check(userInitiated: true) }
+    @objc private func addTunnel() { ManageWindow.show(model: model, addTunnel: true) }
+    @objc private func openSettings() { SettingsWindow.show(model: model) }
     @objc private func releaseKillSwitch() { model.releaseKillSwitch() }
     @objc private func installUpdate() {
         if case let .available(release) = updater.state { updater.install(release) }
@@ -319,60 +359,15 @@ final class MenuController: NSObject, NSMenuDelegate {
     private var updateTitle: String {
         switch updater.state {
         case .idle, .checking: return ""
-        case let .available(release): return "Update to Bridge \(release.version)…"
-        case let .downloading(_, progress): return "Downloading update… \(Int(progress * 100))%"
-        case .installing: return "Installing update…"
+        case let .available(release): return String(localized: "Update to Bridge \(release.version)…")
+        case let .downloading(_, progress): return String(localized: "Downloading update… \(Int(progress * 100))%")
+        case .installing: return String(localized: "Installing update…")
         }
     }
 
-    @objc private func about() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Bridge",
-            .applicationVersion: Updater.currentVersion,
-            .version: "",
-            .credits: Self.aboutCredits,
-        ])
-    }
-
-    /// License block for the About panel, with a link to the repository.
-    private static var aboutCredits: NSAttributedString {
-        let center = NSMutableParagraphStyle()
-        center.alignment = .center
-        center.paragraphSpacing = 4
-        let body: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: center,
-        ]
-        let repo = "https://github.com/\(Updater.repository)"
-        let text = NSMutableAttributedString()
-        // Every protocol Bridge connects to, as one centered picture: the same tiles
-        // as the menu, protocols on top and OpenConnect's vendors below.
-        let attachment = NSTextAttachment()
-        attachment.image = KindTile.aboutGrid
-        attachment.bounds = NSRect(origin: .zero, size: KindTile.aboutGrid.size)
-        text.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 5)]))
-        let picture = NSMutableAttributedString(attachment: attachment)
-        picture.addAttributes([.paragraphStyle: center], range: NSRange(location: 0, length: picture.length))
-        text.append(picture)
-        text.append(NSAttributedString(string: "\n\n", attributes: body))
-        text.append(NSAttributedString(string: "Free and open source under the MIT License.\n", attributes: body))
-        text.append(NSAttributedString(
-            string: "Use, copy, modify and distribute it freely; provided “as is”, without warranty.\n",
-            attributes: body))
-        var link = body
-        link[.link] = URL(string: repo)!
-        link[.foregroundColor] = NSColor.linkColor
-        text.append(NSAttributedString(string: repo.replacingOccurrences(of: "https://", with: ""), attributes: link))
-        text.append(NSAttributedString(
-            string: "\n\nIncludes amneziawg-go (MIT), OpenVPN (GPL-2.0), OpenConnect (LGPL-2.1) "
-                + "and Xray-core (MPL-2.0).\n"
-                + "Product names and logos are trademarks of their owners, shown to identify "
-                + "compatible services; logo artwork from Simple Icons (CC0).",
-            attributes: body))
-        return text
-    }
-
     @objc private func quit() { NSApp.terminate(nil) }
+}
+
+private extension NSFont {
+    var bold: NSFont { NSFontManager.shared.convert(self, toHaveTrait: .boldFontMask) }
 }

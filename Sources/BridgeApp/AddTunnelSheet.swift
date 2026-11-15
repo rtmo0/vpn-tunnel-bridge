@@ -53,14 +53,14 @@ enum AddTunnelKind: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .amneziawg, .wireguard: ".conf file"
-        case .openvpn: ".ovpn file"
-        case .vless: "vless:// link"
-        case .trojan: "trojan:// link"
-        case .hysteria2: "hysteria2:// link"
-        case .anyconnect: "and ocserv"
+        case .amneziawg, .wireguard: String(localized: ".conf file")
+        case .openvpn: String(localized: ".ovpn file")
+        case .vless: String(localized: "vless:// link")
+        case .trojan: String(localized: "trojan:// link")
+        case .hysteria2: String(localized: "hysteria2:// link")
+        case .anyconnect: String(localized: "and ocserv")
         case .pulse: "Pulse Secure"
-        default: "Server login"
+        default: String(localized: "Server login")
         }
     }
 
@@ -132,9 +132,9 @@ enum AddTunnelKind: String, CaseIterable, Identifiable {
     }
 
     static let groups: [(title: String, kinds: [AddTunnelKind])] = [
-        ("Config file", [.amneziawg, .wireguard, .openvpn]),
-        ("Share link", [.vless, .trojan, .hysteria2]),
-        ("Server login · OpenConnect", [.anyconnect, .fortinet, .globalprotect, .pulse, .juniper, .f5, .array]),
+        (String(localized: "Config file"), [.amneziawg, .wireguard, .openvpn]),
+        (String(localized: "Share link"), [.vless, .trojan, .hysteria2]),
+        (String(localized: "Server login · OpenConnect"), [.anyconnect, .fortinet, .globalprotect, .pulse, .juniper, .f5, .array]),
     ]
 }
 
@@ -191,6 +191,9 @@ struct AddTunnelSheet: View {
 
             Divider()
             HStack {
+                Text("Double-click a card to continue")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel") { onDone(nil) }
                     .keyboardShortcut(.cancelAction)
@@ -269,20 +272,6 @@ struct KindTile: View {
         .shadow(color: .black.opacity(shadow ? 0.25 : 0), radius: 1.5, y: 1)
     }
 
-    /// All tiles in two centered rows for the About panel: protocols, then OpenConnect vendors.
-    static let aboutGrid: NSImage = MainActor.assumeIsolated {
-        let rows = AddTunnelKind.groups.map(\.kinds)
-        let view = VStack(spacing: 6) {
-            HStack(spacing: 6) { ForEach(rows.dropLast().flatMap { $0 }) { KindTile(kind: $0, size: 22, shadow: false) } }
-            HStack(spacing: 6) { ForEach(rows.last ?? []) { KindTile(kind: $0, size: 22, shadow: false) } }
-        }
-        .padding(1)
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 2
-        guard let cgImage = renderer.cgImage else { return NSImage() }
-        return NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width) / 2, height: CGFloat(cgImage.height) / 2))
-    }
-
     private static var cache: [AddTunnelKind: NSImage] = [:]
 
     /// The tile as a 16 pt image for menu items, drawn at Retina scale. Main thread only,
@@ -344,8 +333,8 @@ private struct AddTunnelDetail: View {
             if !errors.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(errors, id: \.self) { error in
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                        Label(error, systemImage: "exclamationmark.circle.fill")
+                            .foregroundStyle(.red)
                             .font(.callout)
                             .textSelection(.enabled)
                     }
@@ -356,38 +345,34 @@ private struct AddTunnelDetail: View {
 
             Divider()
             HStack {
-                Button("Back") { onBack() }
+                Button { onBack() } label: { Label("Back", systemImage: "chevron.left") }
                 Spacer()
                 Button("Cancel") { onDone(nil) }
                     .keyboardShortcut(.cancelAction)
                 switch kind.source {
                 case .link:
-                    Button("Add") { addLinks() }
+                    let count = linkPreview.tunnels.count
+                    Button(count > 1 ? String(localized: "Add \(count) Tunnels") : String(localized: "Add")) { addLinks() }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(linkCount == 0)
+                        .disabled(count == 0)
                 case .server(let p):
-                    Button("Add") { addServer(p) }
+                    Button(String(localized: "Add")) { addServer(p) }
                         .keyboardShortcut(.defaultAction)
                         .disabled(server.trimmingCharacters(in: .whitespaces).isEmpty)
                 case .file:
-                    EmptyView()  // the drop zone has the Choose File button
+                    Button("Choose File…") { chooseFiles() }
+                        .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(16)
-        }
-        .onAppear {
-            if kind.source == .link, let clip = NSPasteboard.general.string(forType: .string),
-               (try? TunnelLibrary.proxyLinks(in: clip))?.isEmpty == false {
-                linksText = clip
-            }
         }
     }
 
     private var headline: String {
         switch kind.source {
-        case .file: "Import the configuration file your provider or administrator gave you."
-        case .link: "Paste one or more links, or a subscription."
-        case .server: "Bridge asks for the password, one-time code or SSO sign-in when you connect."
+        case .file: String(localized: "Import the configuration file your provider or administrator gave you.")
+        case .link: String(localized: "Paste one or more links, or a subscription.")
+        case .server: String(localized: "Bridge asks for the password, one-time code or SSO sign-in when you connect.")
         }
     }
 
@@ -401,10 +386,13 @@ private struct AddTunnelDetail: View {
                 .background(RoundedRectangle(cornerRadius: 14).fill(dropTargeted ? Color.accentColor.opacity(0.08) : .clear))
                 .overlay(
                     VStack(spacing: 10) {
-                        Image(systemName: "doc.badge.plus").font(.system(size: 36)).foregroundStyle(.secondary)
+                        Image(systemName: "doc.badge.plus").font(.system(size: 36))
+                            .foregroundStyle(dropTargeted ? Color.accentColor : .secondary)
                         Text("Drop \(extensions.map { ".\($0)" }.joined(separator: " or ")) files here")
                             .font(.headline)
-                        Button("Choose File…") { chooseFiles() }
+                        Text("or choose them with the button below")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
                 )
                 .frame(height: 300)
@@ -413,8 +401,8 @@ private struct AddTunnelDetail: View {
                     return true
                 }
             Text(kind == .openvpn
-                 ? "Certificates and keys the .ovpn file points to are copied into Bridge; a login file goes to the Keychain."
-                 : "Several files can be imported at once.")
+                 ? String(localized: "Certificates and keys the .ovpn file points to are copied into Bridge; a login file goes to the Keychain.")
+                 : String(localized: "Several files can be imported at once."))
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -423,8 +411,8 @@ private struct AddTunnelDetail: View {
     private func chooseFiles() {
         guard case .file(let extensions) = kind.source else { return }
         let panel = NSOpenPanel()
-        panel.title = "Import \(kind.title)"
-        panel.prompt = "Import"
+        panel.title = String(localized: "Import \(kind.title)")
+        panel.prompt = String(localized: "Import")
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.allowedContentTypes = extensions.compactMap { UTType(filenameExtension: $0) }
@@ -458,7 +446,36 @@ private struct AddTunnelDetail: View {
 
     // MARK: Links
 
-    private var linkCount: Int { (try? TunnelLibrary.proxyLinks(in: linksText))?.count ?? 0 }
+    private struct LinkPreview {
+        var tunnels: [(name: String, kind: TunnelKind)] = []
+        var problems: [String] = []
+    }
+
+    /// What adding the pasted text would create, and the lines that would be skipped.
+    private var linkPreview: LinkPreview {
+        var preview = LinkPreview()
+        guard !linksText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return preview }
+        for (index, line) in linksText.split(whereSeparator: \.isNewline).enumerated() {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            if let scheme = text.range(of: "://"), !ProxyLink.isLink(ProxyLink.normalized(text)) {
+                preview.problems.append(String(localized: "Line \(index + 1): \(text[..<scheme.lowerBound]):// links are not supported"))
+            }
+        }
+        guard let links = try? TunnelLibrary.proxyLinks(in: linksText) else {
+            if preview.problems.isEmpty { preview.problems.append(String(localized: "No vless://, trojan:// or hysteria2:// links found")) }
+            return preview
+        }
+        for (index, link) in links.enumerated() {
+            let fallback = "\(ProxyLink.kind(of: link)?.fileExtension ?? "link")-\(index + 1)"
+            do {
+                let loaded = try TunnelLibrary.loadedLink(link, fallbackName: fallback)
+                preview.tunnels.append((loaded.suggestedName, loaded.kind))
+            } catch {
+                preview.problems.append(String(localized: "Link \(index + 1): \(error.localizedDescription)"))
+            }
+        }
+        return preview
+    }
 
     private var linkStep: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -478,9 +495,9 @@ private struct AddTunnelDetail: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .frame(height: 230)
+                .frame(height: 150)
             HStack {
-                Text(linkCount == 0 ? "No links yet" : "\(linkCount) link\(linkCount == 1 ? "" : "s") found")
+                Text("VLESS, Trojan and Hysteria 2 links can be mixed; each becomes a tunnel.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Paste") { linksText = NSPasteboard.general.string(forType: .string) ?? linksText }
@@ -492,8 +509,39 @@ private struct AddTunnelDetail: View {
                     linksText = text
                 }
             }
-            Text("VLESS, Trojan and Hysteria 2 links can be mixed; each becomes a tunnel.")
-                .font(.caption).foregroundStyle(.secondary)
+            let preview = linkPreview
+            if !preview.tunnels.isEmpty || !preview.problems.isEmpty {
+                Text(preview.tunnels.count == 1 ? String(localized: "1 tunnel will be added") : String(localized: "\(preview.tunnels.count) tunnels will be added"))
+                    .font(.headline)
+                    .padding(.top, 10)
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(preview.tunnels.enumerated()), id: \.offset) { _, tunnel in
+                            HStack(spacing: 10) {
+                                KindTile(kind: AddTunnelKind(tunnel.kind), size: 20, shadow: false)
+                                Text(tunnel.name)
+                                Spacer()
+                                Text(tunnel.kind.displayName).foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: 34)
+                            Divider().padding(.leading, 12)
+                        }
+                        ForEach(preview.problems, id: \.self) { problem in
+                            HStack {
+                                Label(problem, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+                                Spacer()
+                                Text("skipped").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 34)
+                        }
+                    }
+                }
+                .frame(maxHeight: 190)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.2)))
+            }
         }
     }
 
@@ -515,22 +563,35 @@ private struct AddTunnelDetail: View {
                 TextField("Server", text: $server, prompt: Text("vpn.example.com or vpn.example.com/group"))
                 TextField("Username", text: $username, prompt: Text("Optional"))
                 TextField("Group", text: $group, prompt: Text("Optional"))
-                TextField("Name", text: $name, prompt: Text("Optional, e.g. Office"))
+                TextField("Name in Bridge", text: $name, prompt: Text("Optional, e.g. Office"))
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
             .frame(height: 210)
-            HStack {
-                Text(p == .anyconnect
-                     ? "Works with Cisco ASA / Secure Firewall and ocserv servers."
-                     : "Uses OpenConnect's \(p.displayName) support. Bridge is tested with AnyConnect-compatible "
-                        + "servers; tell us how it works with yours.")
+            Button("Import .openconnect profile…") { importProfile() }
+                .buttonStyle(.link)
+                .padding(.leading, 4)
+            if p == .anyconnect {
+                Text("Works with Cisco ASA / Secure Firewall and ocserv servers.")
                     .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Import Profile…") { importProfile() }
-                    .help("Import a .openconnect profile file")
+            } else {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(Self.markdown(String(localized: "Bridge is tested mostly with AnyConnect-compatible servers. If \(kind.title) works or fails for you, [tell us on GitHub](\(Self.issuesURL)).")))
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+
+    private static var issuesURL: String { "https://github.com/\(Updater.repository)/issues" }
+
+    private static func markdown(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text)) ?? AttributedString(text)
     }
 
     private func addServer(_ p: OpenConnectConfig.VPNProtocol) {

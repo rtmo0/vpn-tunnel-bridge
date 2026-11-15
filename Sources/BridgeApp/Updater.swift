@@ -47,9 +47,10 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
     private var pending: Release?
 
     func start() {
-        check(userInitiated: false)
+        let automatic = { UserDefaults.standard.bool(forKey: Preferences.autoCheckUpdates) }
+        if automatic() { check(userInitiated: false) }
         let timer = Timer(timeInterval: 6 * 3600, repeats: true) { [weak self] _ in
-            self?.check(userInitiated: false)
+            if automatic() { self?.check(userInitiated: false) }
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
@@ -64,6 +65,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         if case .downloading = state { return }
         if case .installing = state { return }
         state = .checking
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Preferences.lastUpdateCheck)
         let repo = Self.repository
         var request = URLRequest(url: URL(string: "https://github.com/\(repo)/releases/latest")!)
         request.httpMethod = "HEAD"
@@ -78,9 +80,9 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
                     self.state = .idle
                     if userInitiated {
                         let reason = error?.localizedDescription
-                            ?? (finalURL.hasSuffix("/releases") ? "No releases published yet."
-                                : "GitHub answered with status \(http?.statusCode ?? 0).")
-                        Alerts.show("Could not check for updates", reason)
+                            ?? (finalURL.hasSuffix("/releases") ? String(localized: "No releases published yet.")
+                                : String(localized: "GitHub answered with status \(http?.statusCode ?? 0)."))
+                        Alerts.show(String(localized: "Could not check for updates"), reason)
                     }
                 }
                 return
@@ -100,7 +102,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
                 } else {
                     self.state = .idle
                     if userInitiated {
-                        Alerts.info("Bridge is up to date", "Version \(Self.currentVersion) is the latest.")
+                        Alerts.info(String(localized: "Bridge is up to date"), String(localized: "Version \(Self.currentVersion) is the latest."))
                     }
                 }
             }
@@ -140,12 +142,12 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         let notes = release.notes.trimmingCharacters(in: .whitespacesAndNewlines)
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Bridge \(release.version) is available"
-        alert.informativeText = "You have \(Self.currentVersion). Bridge will download the update, restart, "
-            + "and keep your tunnels connected.\n\n" + (notes.isEmpty ? "" : String(notes.prefix(600)))
-        alert.addButton(withTitle: "Install and Restart")
-        alert.addButton(withTitle: "Later")
-        alert.addButton(withTitle: "Release Notes")
+        alert.messageText = String(localized: "Bridge \(release.version) is available")
+        alert.informativeText = String(localized: "You have \(Self.currentVersion). Bridge will download the update, restart, and keep your tunnels connected.")
+            + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
+        alert.addButton(withTitle: String(localized: "Install and Restart"))
+        alert.addButton(withTitle: String(localized: "Later"))
+        alert.addButton(withTitle: String(localized: "Release Notes"))
         switch alert.runModal() {
         case .alertFirstButtonReturn: download(release)
         case .alertThirdButtonReturn: NSWorkspace.shared.open(release.page)
@@ -174,7 +176,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         do {
             try FileManager.default.moveItem(at: location, to: zip)
         } catch {
-            fail("Could not save the download: \(error.localizedDescription)")
+            fail(String(localized: "Could not save the download: \(error.localizedDescription)"))
             return
         }
         guard let release = pending else { return }
@@ -182,7 +184,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error { fail("Download failed: \(error.localizedDescription)") }
+        if let error { fail(String(localized: "Download failed: \(error.localizedDescription)")) }
         session.finishTasksAndInvalidate()
     }
 
@@ -190,7 +192,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         DispatchQueue.main.async {
             if let release = self.pending { self.state = .available(release) } else { self.state = .idle }
             self.pending = nil
-            Alerts.show("Update failed", message)
+            Alerts.show(String(localized: "Update failed"), message)
         }
     }
 
@@ -200,7 +202,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
                 let expected = String(decoding: try Data(contentsOf: checksumURL), as: UTF8.self)
                     .split(whereSeparator: \.isWhitespace).first.map(String.init)?.lowercased() ?? ""
                 let actual = SHA256.hash(data: try Data(contentsOf: zip)).map { String(format: "%02x", $0) }.joined()
-                guard expected == actual else { throw UpdateError("Checksum mismatch: the download is corrupted.") }
+                guard expected == actual else { throw UpdateError(String(localized: "Checksum mismatch: the download is corrupted.")) }
             }
 
             let staging = FileManager.default.temporaryDirectory.appendingPathComponent("Bridge-update-\(UUID().uuidString)")
@@ -209,7 +211,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
             let newApp = staging.appendingPathComponent("Bridge.app")
             guard let bundle = Bundle(url: newApp),
                   bundle.bundleIdentifier == Bundle.main.bundleIdentifier else {
-                throw UpdateError("The downloaded archive does not contain Bridge.")
+                throw UpdateError(String(localized: "The downloaded archive does not contain Bridge."))
             }
             try run("/usr/bin/codesign", ["--verify", "--deep", newApp.path])
             DispatchQueue.main.async {
@@ -243,7 +245,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         do {
             try process.run()
         } catch {
-            fail("Could not start the installer: \(error.localizedDescription)")
+            fail(String(localized: "Could not start the installer: \(error.localizedDescription)"))
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }

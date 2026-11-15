@@ -8,6 +8,7 @@ enum BridgeApp {
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+        Preferences.register()
         controller = MenuController(model: AppModel())
         app.run()
     }
