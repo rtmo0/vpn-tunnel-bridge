@@ -20,13 +20,19 @@ Bridge started as a replacement for clients that silently drop newer AmneziaWG s
 
 It needs no Network Extension, no Apple Developer account and no App Store. A small helper runs the VPN backends with administrator rights, much like Tunnelblick or Shimo do.
 
-![Menu bar icon: off, connecting, connected, three tunnels, error](docs/habr/images/menu-icon.png)
+<p align="center">
+  <img src="docs/images/ui-menu.jpg" alt="Bridge menu with two connected tunnels" width="300">
+  &nbsp;
+  <img src="docs/images/ui-manage.jpg" alt="Manage Tunnels window" width="520">
+</p>
+
+The interface is in English, Russian and German, following the system language. The [screen-by-screen design](docs/design/index.html) shows every window, menu and dialog.
 
 ## What it can do
 
 | | Feature |
 | :-: | --- |
-| ✅ | Lives in the menu bar, no Dock icon. The **VPN** icon shows the state: outlined when off, dots while connecting, filled when connected, the number of connected tunnels when there are several, or **!** on an error |
+| ✅ | Lives in the menu bar, no Dock icon. The **VPN** icon shows the state: outlined when off, dots while connecting, filled when connected, the number of connected tunnels when there are several, or **!** when something needs you |
 | ✅ | Each tunnel shows its protocol's logo (WireGuard, OpenVPN, Cisco, Fortinet, GlobalProtect, F5…) in the menu and the Manage window |
 | ✅ | **AmneziaWG** with every parameter: `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` (including ranges), `I1`–`I5`, `HeaderProtectionKey`, `ContentPaddingAddition`, timing options |
 | ✅ | **WireGuard** configs as they are |
@@ -36,7 +42,10 @@ It needs no Network Extension, no Apple Developer account and no App Store. A sm
 | ✅ | **Trojan** from `trojan://` links, with the same transports and TLS/REALITY options |
 | ✅ | **Hysteria 2** from `hysteria2://` / `hy2://` links: salamander obfuscation, port hopping (`host:443,20000-30000`), pinned certificates, Brutal bandwidth (`upmbps`) |
 | ✅ | Several tunnels at the same time |
-| ✅ | Manage Tunnels window: live status, config summary, built-in config editor, rename, remove |
+| ✅ | Manage Tunnels window: live status, config summary, settings that apply as you change them, a config editor that checks as you type, rename, remove |
+| ✅ | Settings window: open at login, automatic updates, helper status, logs, routing profiles |
+| ✅ | A notification when a tunnel drops in the background |
+| ✅ | English, Russian and German |
 | ✅ | Split tunnelling: all traffic, only listed networks, or everything except listed networks |
 | ✅ | Routing profiles for VLESS / Trojan / Hysteria 2 (`routing.json` or `happ://routing/…`, e.g. RoscomVPN): per-site proxy, direct or block with geosite/geoip lists, and DNS split between a domestic and a remote resolver |
 | ✅ | Keep the local network (printers, NAS, AirPlay) off the VPN |
@@ -56,23 +65,30 @@ It needs no Network Extension, no Apple Developer account and no App Store. A sm
 - An administrator account on the Mac (needed once, to install the network helper).
 - **Apple Silicon** (M1 or later) for all protocols. On **Intel** Macs, everything except OpenVPN and OpenConnect works; OpenVPN is currently built for Apple Silicon only.
 
-### 1. Download
+### 1. Download and install
 
-1. Open the [latest release](https://github.com/rtmo0/vpn-tunnel-bridge/releases/latest).
-2. Under **Assets**, download **`Bridge.zip`**.
-3. Open your **Downloads** folder and double-click `Bridge.zip`. You get **`Bridge.app`**.
-4. Drag **`Bridge.app`** into **Applications**.
+1. Open the [latest release](https://github.com/rtmo0/vpn-tunnel-bridge/releases/latest) and download **`Bridge-<version>.dmg`** under **Assets**.
+2. Open the disk image. It contains **Bridge**, a link to **Applications**, **Install Bridge.command** and a **Read Me**.
+3. Open **Terminal** (Applications → Utilities), type `bash ` (with a space), drag **Install Bridge.command** from the disk image into the Terminal window and press Return. For example:
 
-Optional: check the download. The release also contains `Bridge.zip.sha256`. In Terminal:
+   ```bash
+   bash "/Volumes/Bridge 0.9.0/Install Bridge.command"
+   ```
+
+   The script copies Bridge into Applications, removes the “downloaded from the internet” flag so macOS opens it without a warning, and starts it.
+
+Optional: check the download. The release also contains `Bridge-<version>.dmg.sha256`:
 
 ```bash
 cd ~/Downloads
-shasum -a 256 Bridge.zip      # must match the text inside Bridge.zip.sha256
+shasum -a 256 Bridge-*.dmg    # must match the text inside the .sha256 file
 ```
 
-### 2. Allow it to open the first time
+`Bridge.zip` in the release is for the built-in updater of earlier versions.
 
-Bridge isn't notarized by Apple: that needs a paid developer account, and Bridge is a free project. So the first time you open it, macOS shows a warning such as *“Bridge” can’t be opened* or *Apple could not verify “Bridge”*. This happens once.
+### 2. Or install by hand
+
+Bridge isn't notarized by Apple: that needs a paid developer account, and Bridge is a free project. Without the installer script, drag **Bridge** into **Applications**; the first time you open it, macOS shows a warning such as *“Bridge” can’t be opened* or *Apple could not verify “Bridge”*. This happens once.
 
 **On macOS 15 Sequoia and later:**
 
@@ -93,25 +109,25 @@ open /Applications/Bridge.app
 ### 3. Install the network helper
 
 1. A **VPN** icon appears in the menu bar, at the top right of the screen. Bridge has no Dock icon and no window by default.
-2. Click the VPN icon and choose **Install Helper…**.
+2. Click the VPN icon and choose **Install Network Helper…**. (Clicking a tunnel offers the same.)
 3. Enter your Mac password when asked.
 
 The helper is a background service (`/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper`). It creates the tunnels, sets routes and DNS, and keeps tunnels running even when the app is closed. Bridge asks to update it after every app update. This also takes one password prompt, and it briefly disconnects your tunnels.
 
 ### 4. Add your tunnels
 
-1. Click the VPN icon, choose **Manage Tunnels…** (⌘,) and click **+** at the bottom of the list.
-2. Pick the kind of VPN you have, then:
+1. Click the VPN icon and choose **Add Tunnel…** (first run) or **Manage Tunnels…**, then click **+** at the bottom of the list.
+2. Pick the kind of VPN you have (double-click the card or click **Continue**), then:
    - **AmneziaWG, WireGuard, OpenVPN**: drop the `.conf` / `.ovpn` files in, or choose them. For OpenVPN, certificates and keys the `.ovpn` points to are copied into Bridge (you can delete the originals), and a login file (`auth-user-pass file.txt`) goes into the Keychain.
-   - **VLESS, Trojan, Hysteria 2**: paste one or more `vless://`, `trojan://` or `hysteria2://` links or a subscription (copied links are filled in for you).
+   - **VLESS, Trojan, Hysteria 2**: paste one or more `vless://`, `trojan://` or `hysteria2://` links or a subscription. Bridge lists the tunnels it will add and the lines it skips.
    - **Cisco AnyConnect, Fortinet, GlobalProtect, Ivanti, Juniper, F5, Array**: enter the server address and, optionally, username and group.
-3. To connect, click the tunnel's name in the menu. A check mark means it's connected; the line underneath shows uptime and speed.
+3. To connect, click the tunnel's name in the menu. A check mark and a green dot mean it's connected; the line underneath shows uptime, speed and address.
 
 OpenVPN servers that need a login ask for a username and password the first time. Tick **Remember in Keychain** and you won't be asked again.
 
 ### 5. Optional: start at login
 
-Open **System Settings → General → Login Items** and add **Bridge** under *Open at Login*.
+Menu → **Settings…** → **General** → **Open Bridge at login**.
 
 ### Coming from Shimo, AmneziaVPN or the WireGuard app
 
@@ -124,38 +140,46 @@ Open **System Settings → General → Login Items** and add **Bridge** under *O
 
 | Item | What it does |
 | --- | --- |
-| **Status** | Connected tunnel, connecting, inactive, or a helper or kill switch notice |
-| Tunnel names | Click to connect or disconnect. ✓ = connected; animated dots = connecting |
+| **Status** | Connected tunnel(s), connecting, not connected, or what needs setting up |
+| **Unblock Internet** · **Install / Update Helper…** · **Update to Bridge x.y…** | Coloured items, shown only when something needs you. The menu bar icon shows **!** for a blocked kill switch or an outdated helper |
+| Tunnel names | Click to connect or disconnect. ✓ and a green dot = connected; animated dots and an orange dot = connecting |
 | **Disconnect All** | Shown while anything is connected |
-| **Manage Tunnels…** (⌘,) | The window with details and settings |
-| **Update to Bridge x.y…** | Shown when a new release is out |
-| **Unblock Internet (Kill Switch)** | Shown when a dropped tunnel's kill switch is blocking traffic |
+| **Manage Tunnels…** | The window with details and settings of each tunnel |
+| **Settings…** (⌘,) | App-wide settings |
 
 ### Manage Tunnels
 
 Select a tunnel on the left. On the right:
 
-- **Status**: uptime, server, interface, addresses, DNS, last handshake (WireGuard) or last check (VLESS, Trojan, Hysteria 2), traffic.
-- **Configuration**: what the config says. AmneziaWG parameters are listed under a disclosure triangle. **Edit…** opens the config in a text editor that checks it before saving.
-- **Sign-in** (OpenVPN with a login): view or change the saved username and password.
+- **Status** (while connected): uptime, speed, total traffic, addresses, last handshake (WireGuard) or last check (VLESS, Trojan, Hysteria 2).
+- **Configuration**: what the config says. AmneziaWG parameters are listed under a disclosure triangle. **Edit…** opens the config in an editor that checks it as you type.
+- **Sign-in** (OpenVPN and OpenConnect): the saved username; type a password to save it in the Keychain, or **Forget Password…**.
 - **Routing**:
   - *As in configuration*: AllowedIPs, or the routes the OpenVPN server pushes.
   - *All traffic*: everything through the VPN.
   - *Only these networks* (split tunnelling): only listed networks use the VPN.
   - *All traffic except these networks*: listed networks go direct.
   - *Keep local networks off the VPN*: 10/8, 172.16/12, 192.168/16 stay on your LAN.
-  - *Kill switch*: see below.
+  - *Kill switch*: see below (the ⓘ button explains it).
 - **DNS**:
   - *From configuration*, *Custom* servers, or *Don't change system DNS*.
   - *Only for domains* (split DNS): the VPN's DNS answers only these domains, e.g. `corp.example`. Everything else uses your normal DNS. Use it for corporate VPNs whose internal names only resolve inside the network.
 
-Changes are saved with **Save** (⌘S). If the tunnel is connected, Bridge offers to reconnect it so they take effect. The config file itself is never changed by these settings.
+Settings apply as you change them; text fields are saved when you leave them. A value Bridge can't use is marked under its field and isn't saved. If the tunnel is connected, a banner offers **Reconnect** so the change takes effect. The config file itself is never changed by these settings.
 
-The **+** button at the bottom of the list adds a tunnel of any kind (file, links or server); **−** removes the selected one. The page icon opens the logs.
+The **+** button at the bottom of the list adds a tunnel of any kind (file, links or server); **−** removes the selected one. Next to the app version, the page icon opens the logs. You can also drop `.conf` / `.ovpn` files onto the window.
+
+### Settings
+
+Menu → **Settings…** (⌘,):
+
+- **General**: open Bridge at login, speed under connected tunnels in the menu, automatic update checks and **Check Now**, the helper's state and **Reinstall…**, the tunnels folder and the logs.
+- **Routing Profiles**: import, update and remove routing profiles (see below).
+- **Advanced**: version, source code and licenses.
 
 ### Kill switch
 
-With **Kill switch** on, while that tunnel is connected, the Mac can reach only the tunnel, the VPN server, DHCP and the local network. If the tunnel drops unexpectedly, traffic **stays blocked** so nothing leaks. To get the internet back, reconnect the tunnel or choose **Unblock Internet (Kill Switch)** in the menu. Disconnecting the tunnel yourself lifts the block.
+With **Kill switch** on, while that tunnel is connected, the Mac can reach only the tunnel, the VPN server, DHCP and the local network. If the tunnel drops unexpectedly, traffic **stays blocked** so nothing leaks, and a notification tells you. To get the internet back, reconnect the tunnel or choose **Unblock Internet** in the menu. Disconnecting the tunnel yourself lifts the block.
 
 ### VLESS, Trojan and Hysteria 2
 
@@ -189,7 +213,7 @@ ServerCert = pin-sha256:…    # optional
 
 A routing profile decides per site and network what goes through the tunnel, what goes direct and what is blocked. Bridge reads the format Happ uses (`routing.json`, or a `happ://routing/add/…` link), for example [RoscomVPN](https://github.com/hydraponique/roscomvpn-routing): Russian sites and networks direct, everything else through the VPN, ads and trackers blocked.
 
-- Manage Tunnels → a VLESS, Trojan or Hysteria 2 tunnel → **Routing → Routing profile**. The ⋯ menu next to it imports a profile from a file or the clipboard, downloads its geo files again (**Update**), or removes it.
+- Manage Tunnels → a VLESS, Trojan or Hysteria 2 tunnel → **Routing → Routing profile** picks one. **Manage Profiles…** opens **Settings → Routing Profiles**, where you import a profile from a file or the clipboard, download its geo files again (**Update Geo Files**), or remove it.
 - With a profile, DNS is answered inside the tunnel by the profile's servers: domains that go direct are resolved by the domestic server, the rest by the remote one through the VPN.
 - Direct traffic leaves through Wi-Fi or Ethernet, so a profile with direct rules can't be combined with the kill switch. When the network changes, Bridge restarts such tunnels.
 - Command line: `bridge profile import routing.json`, `bridge profile use <tunnel> RoscomVPN`, `bridge profile update RoscomVPN`.
@@ -201,18 +225,18 @@ A routing profile decides per site and network what goes through the tunnel, wha
 
 ## Updates
 
-Bridge checks GitHub releases at launch and every six hours. You can also choose **Check for Updates…**. When **Update to Bridge x.y…** appears in the menu, click it: Bridge downloads the release, checks its SHA-256 checksum and code signature, replaces itself and restarts; your tunnels stay connected. Afterwards, choose **Update Helper…** once. Updating the helper restarts it, which disconnects the tunnels for a moment: connect them again afterwards.
+Bridge checks GitHub releases at launch and every six hours (turn this off in **Settings → General**, or click **Check Now** there). When **Update to Bridge x.y…** appears in the menu, click it: Bridge downloads the release, checks its SHA-256 checksum and code signature, replaces itself and restarts; your tunnels stay connected. Afterwards, choose **Update Helper…** once (or click a tunnel, which offers it). Updating the helper restarts it, which disconnects the tunnels for a moment: connect them again afterwards.
 
 ## Troubleshooting
 
 | Problem | What to check |
 | --- | --- |
-| macOS won't open Bridge | Step 2 of [Install](#2-allow-it-to-open-the-first-time) |
-| “Helper not installed” or “needs an update” | Click the VPN icon → **Install / Update Helper…** |
+| macOS won't open Bridge | Run **Install Bridge.command** from the disk image, or see [step 2 of Install](#2-or-install-by-hand) |
+| “Set up Bridge to connect” or “The helper needs an update” | Click the VPN icon → **Install Network Helper…** / **Update Helper…** |
 | Connected, but sites don't open | Another VPN app is also connected: disconnect it. Corporate VPN: internal names may need **DNS → Only for domains** |
 | Internal names don't resolve | Manage Tunnels → DNS: set the VPN's DNS server under *Custom* and the company domains under *Only for domains* |
-| No internet after a tunnel dropped | The kill switch is on: menu → **Unblock Internet (Kill Switch)** |
-| Something else | Logs: menu → Manage Tunnels → page icon, or `/var/log/bridge/helper.log` and `/var/log/bridge/<tunnel>.log` |
+| No internet after a tunnel dropped | The kill switch is on: menu → **Unblock Internet** |
+| Something else | Logs: **Settings → General → Open Logs**, or `/var/log/bridge/helper.log` and `/var/log/bridge/<tunnel>.log` |
 
 When reporting a bug, attach the relevant lines from these logs. They never contain keys or passwords.
 
@@ -285,9 +309,10 @@ scripts/build-xray.sh      # Xray-core for VLESS, Trojan and Hysteria 2 (optiona
 scripts/build-openconnect.sh  # OpenConnect + its login helper, static OpenSSL and LZ4 (optional)
 scripts/build.sh           # amneziawg-go, CLI, helper → build/Bridge.app
 open build/Bridge.app
+scripts/make-dmg.sh        # optional: build/Bridge-<version>.dmg with the installer script
 ```
 
-`swift test` runs the unit tests. Pushing a tag such as `v0.4.1` makes GitHub Actions build, test and publish a release, which existing installs pick up as an update.
+`swift test` runs the unit tests. Pushing a tag such as `v0.9.1` makes GitHub Actions build, test and publish a release with the DMG and the updater's ZIP, which existing installs pick up as an update. Release notes come from `docs/releases/<tag>.md` when it exists.
 
 ### Project layout
 
@@ -295,10 +320,12 @@ open build/Bridge.app
 | --- | --- |
 | `Sources/BridgeCore` | Config parsers (wg-quick, OpenVPN, share links), settings, UAPI, helper protocol |
 | `Sources/BridgeClient` | Tunnel library, Keychain, connect flow with password prompts |
-| `Sources/BridgeApp` | Menu bar app, Manage Tunnels window, updater |
+| `Sources/BridgeApp` | Menu bar app, Manage Tunnels and Settings windows, sign-in dialogs, updater |
+| `Resources/*.lproj` | English, Russian and German strings |
+| `docs/design` | Screen-by-screen UI design (HTML) |
 | `Sources/bridge-helper` | Privileged daemon: backends, routes, DNS, firewall, network monitor |
 | `Sources/bridge` | Command-line client |
-| `scripts/` | Build, OpenVPN build, icon, helper installer |
+| `scripts/` | Build, backends, DMG packaging, icon, helper installer |
 | `.github/workflows/release.yml` | Release builds |
 
 ## Support

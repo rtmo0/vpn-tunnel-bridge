@@ -1,0 +1,55 @@
+BRIDGE — VPN CLIENT FOR THE MACOS MENU BAR
+https://github.com/rtmo0/vpn-tunnel-bridge
+
+Bridge is free and open source. It is not notarized by Apple (that needs a paid
+developer account), so macOS warns the first time you open it. Install it in one
+of these ways:
+
+1. Easiest: Terminal
+   Open Terminal (Applications → Utilities) and run:
+
+       bash "/Volumes/Bridge 0.9.0/Install Bridge.command"
+
+   (Or type "bash " and drag "Install Bridge.command" from this window into
+   Terminal, then press Return.) It copies Bridge to Applications, removes the
+   quarantine flag and opens it.
+
+2. By hand
+   Drag Bridge into Applications. Then in Terminal:
+
+       xattr -dr com.apple.quarantine /Applications/Bridge.app
+       open /Applications/Bridge.app
+
+   Or, without Terminal: open Bridge once, click Done, go to System Settings →
+   Privacy & Security and click Open Anyway.
+
+Then click the VPN icon in the menu bar → Install Network Helper… (asks for your
+password once), and add your tunnels with Add Tunnel….
+
+
+BRIDGE — VPN-КЛИЕНТ В СТРОКЕ МЕНЮ MACOS
+
+Bridge бесплатный и с открытым кодом. Он не нотаризован Apple (для этого нужен
+платный аккаунт разработчика), поэтому при первом запуске macOS предупреждает.
+Установите одним из способов:
+
+1. Проще всего: Терминал
+   Откройте Терминал (Программы → Утилиты) и выполните:
+
+       bash "/Volumes/Bridge 0.9.0/Install Bridge.command"
+
+   (Или наберите "bash " и перетащите «Install Bridge.command» из этого окна
+   в Терминал, затем нажмите Return.) Скрипт скопирует Bridge в Программы,
+   снимет флаг карантина и запустит его.
+
+2. Вручную
+   Перетащите Bridge в Программы. Затем в Терминале:
+
+       xattr -dr com.apple.quarantine /Applications/Bridge.app
+       open /Applications/Bridge.app
+
+   Или без Терминала: откройте Bridge, нажмите «Готово», затем Системные
+   настройки → Конфиденциальность и безопасность → «Всё равно открыть».
+
+Потом нажмите значок VPN в строке меню → «Установить сетевой помощник…»
+(один раз спросит пароль) и добавьте туннели через «Добавить туннель…».
