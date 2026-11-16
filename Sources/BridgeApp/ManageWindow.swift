@@ -369,8 +369,13 @@ struct TunnelDetail: View {
             if let status = row?.status { statusSection(status) }
             configurationSection
             if summary?.needsLogin == true { loginSection }
-            routingSection
-            dnsSection
+            if summary?.kind.usesXray == true { modeSection }
+            if settings.isLocalProxy {
+                Section("Routing") { profilePicker }
+            } else {
+                routingSection
+                dnsSection
+            }
             if let error {
                 Section {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -567,6 +572,35 @@ struct TunnelDetail: View {
             if summary?.kind.usesXray == true { profilePicker }
         } header: {
             Text("Routing")
+        }
+    }
+
+    private var modeSection: some View {
+        Section {
+            Picker("Connect as", selection: Binding(
+                get: { settings.isLocalProxy },
+                set: { settings.proxyPort = $0 ? (settings.proxyPort ?? TunnelSettings.defaultProxyPort) : nil })) {
+                Text("System-wide VPN").tag(false)
+                Text("Local proxy").tag(true)
+            }
+            if settings.isLocalProxy {
+                TextField("Proxy port", value: Binding(
+                    get: { settings.proxyPort ?? TunnelSettings.defaultProxyPort },
+                    set: { settings.proxyPort = $0 }), format: .number.grouping(.never))
+                    .font(.body.monospaced())
+            }
+        } header: {
+            Text("Mode")
+        } footer: {
+            Group {
+                if settings.isLocalProxy {
+                    Text("Runs without the network helper or administrator rights. Only apps set to the SOCKS5 or HTTP proxy 127.0.0.1:\(settings.proxyPort ?? TunnelSettings.defaultProxyPort) use it.")
+                } else {
+                    Text("All apps go through the VPN. Uses the network helper.")
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

@@ -75,6 +75,10 @@ private struct GeneralSettings: View {
     @AppStorage(Preferences.lastUpdateCheck) private var lastCheck: Double = 0
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
+    /// nil while unknown (helper not running or not answered yet).
+    @State private var requirePassword: Bool?
+    @State private var changingPassword = false
+    @State private var passwordError: String?
 
     var body: some View {
         Form {
@@ -98,6 +102,19 @@ private struct GeneralSettings: View {
                     }
                 }
             }
+            Section("Security") {
+                Toggle("Ask for my password before tunnel changes", isOn: Binding(
+                    get: { requirePassword ?? false },
+                    set: { setRequirePassword($0) }))
+                    .disabled(requirePassword == nil || changingPassword)
+                Text("Other apps on this Mac then cannot connect, disconnect or change tunnels without you. macOS asks again after 5 minutes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let passwordError {
+                    Text(passwordError).font(.caption).foregroundStyle(.red)
+                }
+            }
             Section("Helper and files") {
                 LabeledContent {
                     Button(model.helper == .notInstalled ? String(localized: "Install…") : String(localized: "Reinstall…")) { model.installHelper() }
@@ -118,6 +135,32 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+        .task(id: model.helper) {
+            requirePassword = await Task.detached { HelperClient.requiresAuthorization() }.value
+        }
+    }
+
+    private func setRequirePassword(_ on: Bool) {
+        changingPassword = true
+        passwordError = nil
+        Task {
+            let error: String? = await Task.detached { () -> String? in
+                do {
+                    try HelperClient.setRequiresAuthorization(on)
+                    return nil
+                } catch let error as ClientError where error.description == "Cancelled" {
+                    return ""
+                } catch {
+                    return "\(error)"
+                }
+            }.value
+            if let error {
+                if !error.isEmpty { passwordError = error }
+            } else {
+                requirePassword = on
+            }
+            changingPassword = false
+        }
     }
 
     private var helperText: String {

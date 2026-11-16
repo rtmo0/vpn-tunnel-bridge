@@ -4,34 +4,22 @@ import Foundation
 // bridge-helper: privileged daemon that brings tunnels up and down.
 // Started by launchd as root (see scripts/install.sh).
 
+// `bridge-helper drop-exec …`: how the daemon starts a backend unprivileged (see Privileges.swift).
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "drop-exec" {
+    dropPrivilegesAndExec(Array(CommandLine.arguments.dropFirst(2)))
+}
+
 setvbuf(stdout, nil, _IOLBF, 0)
 signal(SIGPIPE, SIG_IGN)
 
-// OpenVPN 2.7 runs `bridge-helper` (no arguments) as its dns-updown command with
-// script_type=dns-up|dns-down and the DNS settings in the environment. The tunnel
-// is identified by the parent process, which is that tunnel's openvpn.
-if let scriptType = ProcessInfo.processInfo.environment["script_type"],
-   scriptType == "dns-up" || scriptType == "dns-down" {
-    var env = ProcessInfo.processInfo.environment.filter { key, _ in key == "dev" || key.hasPrefix("dns_") }
-    env["BRIDGE_PPID"] = String(getppid())
-    let request = HelperRequest(command: .openvpnEvent, event: scriptType, environment: env)
-    if let fd = try? UnixSocket.connect(path: HelperProtocol.socketPath, timeout: 10),
-       let data = try? JSONEncoder.bridge.encode(request) {
-        try? UnixSocket.writeAll(fd, String(decoding: data, as: UTF8.self) + "\n")
-        _ = try? UnixSocket.read(fd, until: "\n")
-        close(fd)
-    }
-    exit(0)
-}
-
-// `bridge-helper openvpn-event up|down` is the route-up/down hook that OpenVPN
-// runs (as root). It forwards the event and OpenVPN's environment to the daemon.
+// `bridge-helper openvpn-event up|down` is the route-up/down hook that OpenVPN runs
+// (as root on the first connection, as the backend account after that). It forwards
+// the event and OpenVPN's environment to the daemon, which adds routes and DNS.
 if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event" {
     let env = ProcessInfo.processInfo.environment
     let wanted = env.filter { key, _ in
-        key == "dev" || key.hasPrefix("foreign_option_") || key.hasPrefix("dns_") || key.hasPrefix("ifconfig_")
-            || key.hasPrefix("BRIDGE_") || key == "trusted_ip" || key == "redirect_gateway"
-            || key.hasPrefix("route_redirect_gateway")
+        key == "dev" || key.hasPrefix("foreign_option_") || key.hasPrefix("ifconfig_")
+            || key.hasPrefix("BRIDGE_") || key == "trusted_ip" || key.hasPrefix("route_")
     }
     let request = HelperRequest(command: .openvpnEvent, name: env["BRIDGE_TUNNEL"],
                                 event: CommandLine.arguments[2], environment: wanted)
@@ -45,7 +33,8 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "openvpn-event"
     exit(0)
 }
 
-// `bridge-helper openconnect-event` is OpenConnect's vpnc-script (run as root): it
+// `bridge-helper openconnect-event` is OpenConnect's vpnc-script (run as root on connect,
+// as the backend account after openconnect dropped privileges): it
 // forwards the reason and the server-assigned settings to the daemon and waits,
 // because OpenConnect expects the interface configured when the script returns.
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "openconnect-event" {
@@ -74,12 +63,18 @@ guard getuid() == 0 else {
     exit(1)
 }
 
-for directory in [AmneziaBackend.runDirectory, AmneziaBackend.logDirectory] {
+for directory in [AmneziaBackend.runDirectory, AmneziaBackend.logDirectory, AmneziaBackend.uapiDirectory] {
     try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o755])
 }
 
 log("bridge-helper starting (protocol \(HelperProtocol.version), backend \(AmneziaBackend.executablePath))")
+let backendAccount = BackendAccount.current
+if backendAccount.name == BackendAccount.preferredName {
+    log("backends run as \(backendAccount.name) (uid \(backendAccount.uid))")
+} else {
+    log("! account \(BackendAccount.preferredName) is missing (reinstall the helper); backends run as \(backendAccount.name)")
+}
 do {
     try AmneziaBackend.verifyExecutable(AmneziaBackend.executablePath)
 } catch {
@@ -93,7 +88,12 @@ let manager = TunnelManager()
 manager.queue.sync { manager.firewall.recover() }
 let networkMonitor = NetworkMonitor { manager.queue.async { manager.networkChanged() } }
 // OpenVPN tunnels learn their interface and routes asynchronously (route-up hook).
-OpenVPNRegistry.shared.onRoutesChanged = { manager.queue.async { manager.updateFirewall() } }
+OpenVPNRegistry.shared.onRoutesChanged = {
+    manager.queue.async {
+        manager.ensureServerPins()
+        manager.updateFirewall()
+    }
+}
 OpenConnectRegistry.shared.onChanged = { manager.queue.async { manager.openConnectChanged() } }
 let installedBuild = (try? String(contentsOfFile: URL(fileURLWithPath: AmneziaBackend.helperExecutablePath)
     .deletingLastPathComponent().appendingPathComponent("version").path, encoding: .utf8))?
@@ -130,11 +130,13 @@ func serve(_ fd: Int32) {
     UnixSocket.setTimeout(fd, seconds: 60)
 
     let (authorized, uid) = PeerAuth.isAuthorized(fd: fd)
+    // Unprivileged backends may only report hook events; they never control tunnels.
+    let fromBackend = uid == backendAccount.uid
     func reply(_ response: HelperResponse) {
         guard let data = try? JSONEncoder.bridge.encode(response) else { return }
         try? UnixSocket.writeAll(fd, String(decoding: data, as: UTF8.self) + "\n")
     }
-    guard authorized else {
+    guard authorized || fromBackend else {
         log("rejected request from uid \(uid) (not an administrator)")
         reply(.failure("Only administrators can control tunnels"))
         return
@@ -145,30 +147,61 @@ func serve(_ fd: Int32) {
         reply(.failure("Malformed request"))
         return
     }
+    if fromBackend && request.command != .openconnectEvent && request.command != .openvpnEvent {
+        reply(.failure("Not allowed"))
+        return
+    }
     if request.command == .ping {
         // Answered without the manager queue so clients don't time out while a tunnel connects.
         var response = HelperResponse(ok: true, capabilities: manager.capabilities)
         response.helperBuild = installedBuild
+        response.requireAuthorization = HelperSettings.current.requireAuthorization
         reply(response)
         return
     }
+    // Tunnel changes need the user's password when asked for; changing that setting always does.
+    if HelperRequest.protectedCommands.contains(request.command), uid != 0,
+       HelperSettings.current.requireAuthorization || request.command == .setRequireAuthorization {
+        guard ControlAuthorization.isValid(request.authorization) else {
+            reply(.failure("Bridge asks for your password before changing tunnels", code: .authorizationRequired))
+            return
+        }
+    }
+    if request.command == .setRequireAuthorization {
+        guard let flag = request.flag else {
+            reply(.failure("No value"))
+            return
+        }
+        var settings = HelperSettings.current
+        settings.requireAuthorization = flag
+        do {
+            try HelperSettings.save(settings)
+            log("password before tunnel changes: \(flag ? "on" : "off") (uid \(uid))")
+            reply(HelperResponse(ok: true))
+        } catch {
+            reply(.failure("Could not save the setting: \(error)"))
+        }
+        return
+    }
     if request.command == .openconnectEvent {
-        guard uid == 0, let reason = request.event else {
+        guard uid == 0 || fromBackend, let reason = request.event else {
             reply(.failure("Not allowed"))
             return
         }
         reply(OpenConnectRegistry.shared.handleEvent(tunnel: request.name, reason: reason,
-                                                     environment: request.environment ?? [:]))
+                                                     environment: request.environment ?? [:],
+                                                     peerPID: PeerAuth.peerPID(fd: fd)))
         return
     }
     if request.command == .openvpnEvent {
         // Comes from OpenVPN while `up` may still hold the manager queue.
-        guard uid == 0, let event = request.event else {
+        guard uid == 0 || fromBackend, let event = request.event else {
             reply(.failure("Not allowed"))
             return
         }
         reply(OpenVPNRegistry.shared.handleEvent(tunnel: request.name, event: event,
-                                                 environment: request.environment ?? [:]))
+                                                 environment: request.environment ?? [:],
+                                                 peerPID: PeerAuth.peerPID(fd: fd)))
         return
     }
     let response = manager.queue.sync { manager.handle(request) }

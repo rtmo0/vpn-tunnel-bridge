@@ -21,7 +21,9 @@ if [ "$(id -u)" = 0 ]; then
   exit 1
 fi
 
-if [ ! -x "$ROOT/build/backend/amneziawg-go" ]; then
+# The helper hands amneziawg-go its utun; older builds without that patch can't run unprivileged.
+if [ ! -x "$ROOT/build/backend/amneziawg-go" ] \
+   || ! grep -q '+fd$' "$ROOT/build/backend/amneziawg-go.version" 2>/dev/null; then
   "$ROOT/scripts/build-backend.sh"
 fi
 if [ ! -x "$ROOT/build/backend/openvpn" ]; then

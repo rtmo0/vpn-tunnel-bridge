@@ -3,8 +3,11 @@ import Foundation
 
 /// One running `openvpn` process, driven through its management interface.
 ///
-/// OpenVPN configures the utun interface and routes itself; Bridge supplies
-/// credentials, tracks state and applies DNS from the route-up hook.
+/// OpenVPN opens the utun and sets its address as root, then switches to the
+/// backend account (`user`/`group`, keeping the interface with `persist-tun`).
+/// Routes and DNS are the helper's: it adds them from what the route-up hook
+/// reports (`route-noexec`) and from the PUSH_REPLY in the management log.
+/// Bridge also supplies credentials and tracks state.
 final class OpenVPNBackend: TunnelBackend {
     let process: Process
     let tunnel: String
@@ -27,14 +30,19 @@ final class OpenVPNBackend: TunnelBackend {
     private var _fullTunnel = false
     private var _failure: (code: HelperErrorCode?, message: String, detail: String?)?
     private var _connectedOnce = false
+    /// OpenVPN announced it must reopen the utun (the server pushed different settings on a
+    /// reconnect). Running unprivileged it cannot, so it exits: the helper starts it again.
+    private var _needsFreshStart = false
+    var needsFreshStart: Bool { locked { _needsFreshStart && _connectedOnce } }
 
-    // DNS arrives from the dns-updown hook, routes from route-up; whichever comes
-    // second applies DNS.
-    struct PendingDNS {
-        var servers: [String]
-        var domains: [String]
-        var splitDomainsOnly: Bool
-    }
+    typealias PendingDNS = OpenVPNDNS
+    /// The config's own `dns` options; pushed ones are collected from the management log.
+    private let localDNSOptions: [[String]]
+    /// The config's `pull-filter`s (including Bridge's own from the tunnel settings).
+    private let pullFilters: [[String]]
+    private var _pushedDNSOptions: [[String]] = []
+    /// The last PUSH_REPLY announced more parts (`push-continuation 2`).
+    private var _pushContinues = false
     private var _pendingDNS: PendingDNS?
     private var _routesReady = false
     private var _dnsSplitSetting = false
@@ -44,31 +52,113 @@ final class OpenVPNBackend: TunnelBackend {
 
     var dnsWarning: String? { locked { _dnsWarning } }
 
-    /// Routes Bridge added on OpenVPN's behalf; removed when the tunnel stops.
+    /// Routes the helper added for this tunnel; replaced on every route-up, removed when it stops.
     private var _extraRoutes: [RouteEntry] = []
 
-    /// OpenVPN cannot redirect the default gateway when the current default route
-    /// has no gateway address (e.g. another VPN owns it). Do what it would have done:
-    /// pin the server to the current path, then send all IPv4 traffic into the tunnel.
-    func redirectAllTraffic(dev: String, server: String?) {
+    /// Adds the routes OpenVPN would have added (it runs with `route-noexec`), from the
+    /// route-up environment: redirect-gateway, `route_network_N`, `route_ipv6_network_N`.
+    func applyRoutes(environment env: [String: String]) {
+        removeRoutes()
+        let dev = env["dev"] ?? ""
+        guard !dev.isEmpty else { return }
         var added: [RouteEntry] = []
-        if let server, let ip = IPAddress(server), var path = Routes.lookup(server, ipv6: ip.isIPv6),
-           path.interface != dev {
-            // Straight out through Wi-Fi/Ethernet, not through another VPN.
-            if let interface = path.interface, Routes.isVirtual(interface), !ip.isIPv6,
-               let uplink = Routes.uplink(excluding: [dev]) {
-                path = uplink
-            }
-            let pin = RouteEntry(destination: server, ipv6: ip.isIPv6, gateway: path.gateway,
-                                 interface: path.gateway == nil ? path.interface : nil)
-            if (try? Routes.add(pin)) == true { added.append(pin) }
-        }
-        for half in ["0.0.0.0/1", "128.0.0.0/1"] {
-            let entry = RouteEntry(destination: half, ipv6: false, gateway: nil, interface: dev)
+        func add(_ entry: RouteEntry) {
             if (try? Routes.add(entry)) == true { added.append(entry) }
         }
-        locked { _extraRoutes += added }
-        log("  OpenVPN could not redirect the default gateway; Bridge routed all IPv4 traffic through \(dev)")
+        func outside(_ destination: String) -> RouteEntry? {
+            guard let uplink = Routes.uplink(excluding: [dev]) else { return nil }
+            return RouteEntry(destination: destination, ipv6: false, gateway: uplink.gateway,
+                              interface: uplink.gateway == nil ? uplink.interface : nil)
+        }
+
+        // redirect-gateway: keep the server on the physical uplink, then send all IPv4 into the tunnel
+        // (as two halves, so the system default route stays untouched).
+        if ["1", "2"].contains(env["route_redirect_gateway_ipv4"] ?? "") {
+            if let server = env["trusted_ip"], let ip = IPAddress(server), !ip.isIPv6,
+               var path = Routes.lookup(server, ipv6: false), path.interface != dev {
+                if let interface = path.interface, Routes.isVirtual(interface), let uplink = Routes.uplink(excluding: [dev]) {
+                    path = uplink
+                }
+                add(RouteEntry(destination: server, ipv6: false, gateway: path.gateway,
+                               interface: path.gateway == nil ? path.interface : nil))
+            }
+            for half in ["0.0.0.0/1", "128.0.0.0/1"] {
+                add(RouteEntry(destination: half, ipv6: false, gateway: nil, interface: dev))
+            }
+        }
+
+        // route <network> <netmask> [gateway]: into the tunnel, or outside it for net_gateway.
+        let netGateway = env["route_net_gateway"]
+        var index = 1
+        while let network = env["route_network_\(index)"], let netmask = env["route_netmask_\(index)"] {
+            defer { index += 1 }
+            guard let prefix = Self.prefixLength(netmask: netmask),
+                  let net = IPNetwork("\(network)/\(prefix)")?.masked, !net.isIPv6 else { continue }
+            if let gateway = env["route_gateway_\(index)"], gateway == netGateway {
+                let destination = net.prefix == 32 ? "\(net.address)" : net.description
+                if let entry = outside(destination) { add(entry) }
+            } else {
+                Routes.tunnelRoutes(for: net, interface: dev).forEach(add)
+            }
+        }
+
+        // route-ipv6 (redirect-gateway ipv6 arrives as ::/3, 2000::/4, 3000::/4, fc00::/7).
+        if env["ifconfig_ipv6_local"] != nil {
+            var index6 = 1
+            while let network = env["route_ipv6_network_\(index6)"] {
+                index6 += 1
+                guard let net = IPNetwork(network), net.isIPv6 else { continue }
+                Routes.tunnelRoutes(for: net, interface: dev).forEach(add)
+            }
+        }
+        locked { _extraRoutes = added }
+    }
+
+    func removeRoutes() {
+        let routes = locked { () -> [RouteEntry] in
+            let routes = _extraRoutes
+            _extraRoutes = []
+            return routes
+        }
+        for route in routes.reversed() { Routes.delete(route) }
+    }
+
+    /// The network changed: routes that leave the tunnel (the pinned server,
+    /// net_gateway routes) follow the new uplink.
+    func moveOutsideRoutes(to uplink: Routes.Lookup) {
+        let dev = interface
+        let routes = locked { _extraRoutes }
+        var moved: [RouteEntry] = []
+        for route in routes {
+            guard route.interface != dev, !route.ipv6 else {
+                moved.append(route)
+                continue
+            }
+            let next = RouteEntry(destination: route.destination, ipv6: false, gateway: uplink.gateway,
+                                  interface: uplink.gateway == nil ? uplink.interface : nil)
+            guard next != route else {
+                moved.append(route)
+                continue
+            }
+            Routes.delete(route)
+            moved.append((try? Routes.add(next)) == true ? next : route)
+        }
+        locked { _extraRoutes = moved }
+    }
+
+    static func prefixLength(netmask: String) -> Int? {
+        guard let mask = IPAddress(netmask), !mask.isIPv6 else { return nil }
+        let bits = mask.bytes.reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        let prefix = (~bits).leadingZeroBitCount
+        // Contiguous masks only.
+        guard prefix == 32 || bits << prefix == 0 else { return nil }
+        return prefix
+    }
+
+    /// DNS for the current connection: `dns` options (config and pushed) win over dhcp-option.
+    func dns(foreignOptions env: [String: String]) -> PendingDNS? {
+        let pushed = locked { _pushedDNSOptions }
+        return OpenVPNDNS.from(dnsOptions: localDNSOptions + pushed) ?? OpenVPNDNS.from(foreignOptions: env)
     }
 
     func setDNS(_ dns: PendingDNS?) -> Bool {
@@ -156,8 +246,10 @@ final class OpenVPNBackend: TunnelBackend {
     static var isAvailable: Bool { (try? AmneziaBackend.verifyExecutable(executablePath)) != nil }
 
     private init(process: Process, tunnel: String, managementPath: String, configPath: String, secrets: TunnelSecrets,
-                 settings: TunnelSettings) {
+                 settings: TunnelSettings, localDNSOptions: [[String]], pullFilters: [[String]]) {
         self.settings = settings
+        self.localDNSOptions = localDNSOptions
+        self.pullFilters = pullFilters
         self.process = process
         self.tunnel = tunnel
         self.managementPath = managementPath
@@ -177,8 +269,12 @@ final class OpenVPNBackend: TunnelBackend {
         unlink(managementPath)
 
         let helperPath = AmneziaBackend.helperExecutablePath
+        // OpenVPN opens the utun as root, then continues as the backend account.
+        let account = BackendAccount.current
+        let group = getgrgid(account.gid).map { String(cString: $0.pointee.gr_name) } ?? String(account.gid)
         let prepared = try config.prepared(tunnel: tunnel, managementSocket: managementPath,
-                                           eventCommand: "\(helperPath) openvpn-event", dnsCommand: helperPath)
+                                           eventCommand: "\(helperPath) openvpn-event",
+                                           runAs: (user: account.name, group: group))
         FileManager.default.createFile(atPath: configPath, contents: Data(prepared.text.utf8),
                                        attributes: [.posixPermissions: 0o600])
 
@@ -201,7 +297,8 @@ final class OpenVPNBackend: TunnelBackend {
         process.terminationHandler = { onExit($0.processIdentifier) }
 
         let backend = OpenVPNBackend(process: process, tunnel: tunnel, managementPath: managementPath,
-                                     configPath: configPath, secrets: secrets, settings: settings)
+                                     configPath: configPath, secrets: secrets, settings: settings,
+                                     localDNSOptions: config.dnsOptions, pullFilters: config.pullFilters)
         OpenVPNRegistry.shared.register(backend)
         do {
             try process.run()
@@ -243,6 +340,8 @@ final class OpenVPNBackend: TunnelBackend {
         reader.start()
 
         send("state on")
+        // The log carries the PUSH_REPLY, the only place pushed `dns` options show up.
+        send("log on")
         send("bytecount 2")
         send("hold release")
     }
@@ -308,6 +407,23 @@ final class OpenVPNBackend: TunnelBackend {
                     _rx = UInt64(parts[0]) ?? _rx
                     _tx = UInt64(parts[1]) ?? _tx
                 }
+            }
+        } else if line.hasPrefix(">LOG:") {
+            // >LOG:{time},{flags},{message}
+            let fields = line.dropFirst(">LOG:".count).split(separator: ",", maxSplits: 2, omittingEmptySubsequences: false)
+            if fields.count == 3, fields[2].contains("Pulled options changed on restart") {
+                locked { _needsFreshStart = true }
+                log("  '\(tunnel)' server changed the tunnel settings; OpenVPN will be started again")
+            }
+            guard fields.count == 3, let options = OpenVPNDNS.pushedOptions(inLogMessage: String(fields[2])) else { return }
+            let dnsOptions = OpenVPNDNS.applying(pullFilters: pullFilters, to: options)
+                .filter { $0.first == "dns" }.map { Array($0.dropFirst()) }
+            let continues = options.contains { $0 == ["push-continuation", "2"] }
+            locked {
+                // A new PUSH_REPLY replaces the previous connection's options, unless it continues one.
+                if !_pushContinues { _pushedDNSOptions = [] }
+                _pushedDNSOptions += dnsOptions
+                _pushContinues = continues
             }
         } else if line.hasPrefix(">FATAL:") {
             let message = String(line.dropFirst(">FATAL:".count))
@@ -406,12 +522,7 @@ final class OpenVPNBackend: TunnelBackend {
             return fd
         }
         if fd >= 0 { close(fd) }
-        let extra = locked { () -> [RouteEntry] in
-            let routes = _extraRoutes
-            _extraRoutes = []
-            return routes
-        }
-        for route in extra.reversed() { Routes.delete(route) }
+        removeRoutes()
         OpenVPNRegistry.shared.unregister(tunnel)
         unlink(configPath)
         unlink(managementPath)
@@ -453,72 +564,45 @@ final class OpenVPNRegistry {
         return backends[tunnel]
     }
 
-    func backend(pid: Int32) -> OpenVPNBackend? {
-        lock.lock()
-        defer { lock.unlock() }
-        return backends.values.first { $0.pid == pid }
-    }
-
-    /// Handles hooks run by OpenVPN:
-    /// - `up` / `down`: route-up and down (`bridge-helper openvpn-event …`, tunnel from BRIDGE_TUNNEL)
-    /// - `dns-up` / `dns-down`: dns-updown (`bridge-helper`, tunnel found by the parent pid)
-    func handleEvent(tunnel name: String?, event: String, environment env: [String: String]) -> HelperResponse {
-        let found: OpenVPNBackend?
-        if let name {
-            found = backend(name)
-        } else if let ppid = env["BRIDGE_PPID"].flatMap(Int32.init) {
-            found = backend(pid: ppid)
-        } else {
-            found = nil
+    /// Handles the hooks OpenVPN runs (`bridge-helper openvpn-event up|down`, tunnel from BRIDGE_TUNNEL):
+    /// - `up` (route-up, once the connection is up): add routes and DNS;
+    /// - `down` (OpenVPN exits): remove them.
+    /// After the first connection OpenVPN runs unprivileged, so its environment is only
+    /// believed from processes below that tunnel's OpenVPN (`peerPID` comes from the socket).
+    func handleEvent(tunnel name: String?, event: String, environment env: [String: String],
+                     peerPID: pid_t?) -> HelperResponse {
+        guard let name, let backend = backend(name) else { return .failure("Unknown OpenVPN tunnel") }
+        guard let peerPID, PeerAuth.isProcess(peerPID, descendantOf: backend.pid) else {
+            log("  ignored OpenVPN event for '\(name)' from another process")
+            return .failure("Not this tunnel's process")
         }
-        guard let backend = found else { return .failure("Unknown OpenVPN tunnel") }
         let tunnel = backend.tunnel
 
         switch event {
         case "up":
             let dev = env["dev"] ?? ""
-            let wantsAll = ["1", "2"].contains(env["route_redirect_gateway_ipv4"] ?? "")
-            if wantsAll && env["redirect_gateway"] != "1" {
-                backend.redirectAllTraffic(dev: dev, server: env["trusted_ip"])
-            }
-            // After route-up, a full tunnel sends public destinations to the tunnel device.
+            guard dev.hasPrefix("utun") else { return .failure("No utun interface in the OpenVPN environment") }
+            backend.applyRoutes(environment: env)
+            // A full tunnel now sends public destinations to the tunnel device.
             let full = Routes.lookup("1.1.1.1", ipv6: false)?.interface == dev
             var ipv6: [(String, Int)] = []
             if let v6 = env["ifconfig_ipv6_local"] { ipv6.append((v6, Int(env["ifconfig_ipv6_netbits"] ?? "") ?? 64)) }
-            log("openvpn '\(tunnel)' route-up on \(dev)\(full ? " (all traffic)" : " (selected networks)")")
+            let dns = backend.dns(foreignOptions: env)
+            log("openvpn '\(tunnel)' route-up on \(dev)\(full ? " (all traffic)" : " (selected networks)")"
+                + (dns.map { ", DNS \($0.servers.joined(separator: " "))"
+                    + ($0.domains.isEmpty ? "" : " for \($0.domains.joined(separator: ", "))") } ?? ""))
+            _ = backend.setDNS(dns)
             let haveDNS = backend.setRoutes(interface: dev, full: full, split: env["BRIDGE_DNS_SPLIT"] == "1",
                                             ipv4: env["ifconfig_local"].map { [$0] } ?? [], ipv6: ipv6)
             if haveDNS { backend.applyDNS() }
             onRoutesChanged()
 
-        case "dns-up":
-            var servers: [String] = []
-            var domains: [String] = []
-            var splitOnly = false
-            for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-                if key.hasPrefix("dns_server_"), key.contains("_address_") {
-                    // "1.2.3.4", "1.2.3.4 53", "[fd00::1]:53" …
-                    var address = String(value.split(separator: " ").first ?? "")
-                    if address.hasPrefix("["), let close = address.firstIndex(of: "]") {
-                        address = String(address[address.index(after: address.startIndex)..<close])
-                    }
-                    if IPAddress(address) != nil, !servers.contains(address) { servers.append(address) }
-                } else if key.hasPrefix("dns_server_"), key.contains("_resolve_domain_") {
-                    splitOnly = true
-                    if !domains.contains(value) { domains.append(value) }
-                } else if key.hasPrefix("dns_search_domain_") {
-                    if !domains.contains(value) { domains.append(value) }
-                }
-            }
-            log("openvpn '\(tunnel)' dns-up: \(servers.isEmpty ? "no servers" : servers.joined(separator: ", "))"
-                + (domains.isEmpty ? "" : " for \(domains.joined(separator: ", "))"))
-            let routesReady = backend.setDNS(OpenVPNBackend.PendingDNS(servers: servers, domains: domains, splitDomainsOnly: splitOnly))
-            if routesReady { backend.applyDNS() }
-
-        case "down", "dns-down":
-            log("openvpn '\(tunnel)' \(event)")
+        case "down":
+            log("openvpn '\(tunnel)' down")
             _ = backend.setDNS(nil)
             DNSManager.shared.remove(tunnel: tunnel)
+            backend.removeRoutes()
+            onRoutesChanged()
 
         default:
             return .failure("Unknown event '\(event)'")

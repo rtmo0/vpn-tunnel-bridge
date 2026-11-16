@@ -280,3 +280,13 @@
 "vpn.example.com or vpn.example.com/group" = "vpn.example.com или vpn.example.com/group";
 "“%@” disconnected" = "«%@» отключён";
 "“%@” updated" = "«%@» обновлён";
+"Security" = "Безопасность";
+"Ask for my password before tunnel changes" = "Спрашивать мой пароль перед изменением туннелей";
+"Other apps on this Mac then cannot connect, disconnect or change tunnels without you. macOS asks again after 5 minutes." = "Тогда другие программы на этом Mac не смогут без вас подключать, отключать или менять туннели. macOS спросит пароль снова через 5 минут.";
+"Mode" = "Режим";
+"Connect as" = "Подключать как";
+"System-wide VPN" = "VPN для всей системы";
+"Local proxy" = "Локальный прокси";
+"Proxy port" = "Порт прокси";
+"Runs without the network helper or administrator rights. Only apps set to the SOCKS5 or HTTP proxy 127.0.0.1:%lld use it." = "Работает без сетевого помощника и прав администратора. Через него идут только программы, где указан SOCKS5- или HTTP-прокси 127.0.0.1:%lld.";
+"All apps go through the VPN. Uses the network helper." = "Все программы идут через VPN. Использует сетевой помощник.";

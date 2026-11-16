@@ -280,3 +280,13 @@
 "vpn.example.com or vpn.example.com/group" = "vpn.example.com oder vpn.example.com/group";
 "“%@” disconnected" = "„%@“ getrennt";
 "“%@” updated" = "„%@“ aktualisiert";
+"Security" = "Sicherheit";
+"Ask for my password before tunnel changes" = "Vor Tunneländerungen nach meinem Passwort fragen";
+"Other apps on this Mac then cannot connect, disconnect or change tunnels without you. macOS asks again after 5 minutes." = "Andere Apps auf diesem Mac können Tunnel dann nicht ohne Sie verbinden, trennen oder ändern. macOS fragt nach 5 Minuten erneut.";
+"Mode" = "Modus";
+"Connect as" = "Verbinden als";
+"System-wide VPN" = "Systemweites VPN";
+"Local proxy" = "Lokaler Proxy";
+"Proxy port" = "Proxy-Port";
+"Runs without the network helper or administrator rights. Only apps set to the SOCKS5 or HTTP proxy 127.0.0.1:%lld use it." = "Läuft ohne Netzwerkhelfer und Administratorrechte. Nur Apps, die den SOCKS5- oder HTTP-Proxy 127.0.0.1:%lld nutzen, gehen darüber.";
+"All apps go through the VPN. Uses the network helper." = "Alle Apps gehen über das VPN. Nutzt den Netzwerkhelfer.";

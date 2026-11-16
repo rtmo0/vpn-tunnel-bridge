@@ -183,11 +183,13 @@ public struct RoutingProfile: Codable, Equatable, Sendable {
     /// first outbound is the proxy (tag `proxy`).
     ///
     /// - Parameter directInterface: the physical interface direct traffic is bound
-    ///   to (`IP_BOUND_IF`), so it can't loop back into the tunnel.
-    func apply(to root: inout [String: Any], directInterface: String) {
+    ///   to (`IP_BOUND_IF`), so it can't loop back into the tunnel; nil for a local
+    ///   proxy, whose direct traffic simply uses the system's routes.
+    func apply(to root: inout [String: Any], directInterface: String?) {
         var outbounds = root["outbounds"] as? [[String: Any]] ?? []
-        outbounds.append(["tag": "direct", "protocol": "freedom",
-                          "streamSettings": ["sockopt": ["interface": directInterface, "domainStrategy": "UseIPv4"]]])
+        var sockopt: [String: Any] = ["domainStrategy": "UseIPv4"]
+        if let directInterface { sockopt["interface"] = directInterface }
+        outbounds.append(["tag": "direct", "protocol": "freedom", "streamSettings": ["sockopt": sockopt]])
         outbounds.append(["tag": "block", "protocol": "blackhole"])
         // A and AAAA are answered by Xray's DNS; anything else is refused (REFUSED = 5).
         outbounds.append(["tag": "dns-out", "protocol": "dns", "settings": ["rules": [
@@ -196,7 +198,8 @@ public struct RoutingProfile: Codable, Equatable, Sendable {
         root["outbounds"] = outbounds
 
         // Learn domains from TLS/HTTP/QUIC so domain rules work; routing only, the proxy still gets the IP.
-        if var inbounds = root["inbounds"] as? [[String: Any]], let index = inbounds.firstIndex(where: { $0["tag"] as? String == "tun" }) {
+        if var inbounds = root["inbounds"] as? [[String: Any]],
+           let index = inbounds.firstIndex(where: { ["tun", "local"].contains($0["tag"] as? String) }) {
             inbounds[index]["sniffing"] = ["enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true]
             root["inbounds"] = inbounds
         }

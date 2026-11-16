@@ -218,23 +218,95 @@ public struct OpenVPNConfig: Equatable, Sendable {
 
     // MARK: Hardening (helper side)
 
-    /// Directives that run programs, write files or would fight with Bridge.
-    static let strippedDirectives: Set<String> = [
+    /// Directives Bridge drops with a specific note: scripts and Windows-only options.
+    static let scriptDirectives: Set<String> = [
         "up", "down", "route-up", "route-pre-down", "ipchange", "tls-verify", "auth-user-pass-verify",
-        "client-connect", "client-disconnect", "learn-address", "plugin", "script-security", "up-delay",
-        "up-restart", "down-pre", "daemon", "log", "log-append", "syslog", "cd", "chroot", "writepid",
-        "status", "status-version", "user", "group", "dev", "dev-type", "dev-node", "tmp-dir", "iproute",
-        "dns-updown", "management", "askpass", "auth-user-pass-optional", "machine-readable-output",
-        // Windows-only options found in many provider configs.
+        "client-connect", "client-disconnect", "learn-address", "plugin",
+    ]
+    static let windowsDirectives: Set<String> = [
         "block-outside-dns", "register-dns", "dhcp-release", "dhcp-renew", "ip-win32", "route-method",
         "tap-sleep", "windows-driver", "win-sys", "allow-nonadmin", "service",
-        // OpenVPN runs as root: nothing that loads code or writes files where the config says.
-        "providers", "engine", "pkcs11-providers", "replay-persist", "tls-export-cert", "tls-crypt-v2-verify",
-        "auth-gen-token-secret", "client-config-dir", "ifconfig-pool-persist",
+    ]
+    /// Directives Bridge sets itself (or that would fight with it); dropped without a note.
+    static let ownedDirectives: Set<String> = [
+        "dev", "dev-type", "dev-node", "script-security", "dns-updown", "user", "group", "verb",
+        "auth-user-pass-optional", "route-noexec", "ifconfig-noexec", "persist-tun", "persist-key",
+        "daemon", "log", "log-append", "syslog", "status", "status-version", "writepid", "cd", "chroot",
+        "machine-readable-output",
+    ]
+
+    /// Client options Bridge passes to OpenVPN: an allowlist, so nothing that runs programs,
+    /// loads code or reads and writes files on the config's say-so gets through, however new.
+    /// Certificates and keys go through `fileDirectives` (inline only).
+    static let allowedDirectives: Set<String> = [
+        // Connection
+        "client", "pull", "tls-client", "remote", "remote-random", "remote-random-hostname", "proto",
+        "proto-force", "port", "rport", "lport", "bind", "nobind", "local", "float", "connection",
+        "connect-retry", "connect-retry-max", "connect-timeout", "server-poll-timeout", "resolv-retry",
+        "http-proxy", "http-proxy-option", "http-proxy-retry", "http-proxy-timeout", "socks-proxy",
+        "socks-proxy-retry", "explicit-exit-notify", "single-session", "allow-pull-fqdn",
+        // Tunnel and routing (routes are added by the helper)
+        "topology", "ifconfig", "ifconfig-ipv6", "ifconfig-nowarn", "route", "route-ipv6", "route-gateway",
+        "route-ipv6-gateway", "route-metric", "route-delay", "route-nopull", "pull-filter", "redirect-gateway",
+        "redirect-private", "block-ipv6", "allow-recursive-routing", "dhcp-option", "dns",
+        "persist-remote-ip", "persist-local-ip",
+        // MTU and transport tuning
+        "tun-mtu", "tun-mtu-extra", "tun-max-mtu", "link-mtu", "mssfix", "fragment", "mtu-disc", "mtu-test",
+        "max-packet-size", "sndbuf", "rcvbuf", "txqueuelen", "fast-io", "shaper", "passtos", "tun-ipv6",
+        "disable-dco", "disable-occ",
+        // Liveness
+        "keepalive", "ping", "ping-restart", "ping-exit", "ping-timer-rem", "inactive", "session-timeout",
+        // Crypto and TLS
+        "cipher", "data-ciphers", "data-ciphers-fallback", "ncp-ciphers", "ncp-disable", "auth", "keysize",
+        "tls-version-min", "tls-version-max", "tls-cipher", "tls-ciphersuites", "tls-groups", "ecdh-curve",
+        "tls-cert-profile", "tls-timeout", "tls-exit", "hand-window", "tran-window", "reneg-sec",
+        "reneg-bytes", "reneg-pkts", "remote-cert-tls", "remote-cert-ku", "remote-cert-eku",
+        "verify-x509-name", "ns-cert-type", "peer-fingerprint", "key-direction", "key-method", "replay-window",
+        "no-replay", "mute-replay-warnings", "use-prediction-resistance", "x509-track",
+        // Compression (pushed or legacy)
+        "comp-lzo", "compress", "allow-compression", "comp-noadapt",
+        // Authentication (credentials come from the management interface)
+        "auth-user-pass", "auth-nocache", "auth-retry", "auth-token-user", "static-challenge", "push-peer-info",
+        // Logging and parsing
+        "mute", "ignore-unknown-option", "opt-verify", "show-net-up", "nice", "setenv",
+    ]
+
+    /// Options allowed inside a `<connection>` block.
+    static let connectionDirectives: Set<String> = [
+        "remote", "proto", "port", "rport", "lport", "bind", "nobind", "local", "float", "connect-retry",
+        "connect-retry-max", "connect-timeout", "server-poll-timeout", "http-proxy", "http-proxy-option",
+        "socks-proxy", "link-mtu", "tun-mtu", "tun-mtu-extra", "tun-max-mtu", "mssfix", "fragment",
+        "explicit-exit-notify",
     ]
 
     /// Server-side modes. Bridge is a client; these also unlock server-only hooks.
     static let serverDirectives: Set<String> = ["server", "server-bridge", "mode", "tls-server"]
+
+    /// Proxy options take a credentials file as third argument, which OpenVPN would read as root.
+    static func checkProxy(_ name: String, _ args: [String]) throws {
+        guard name == "http-proxy" || name == "socks-proxy", args.count > 2 else { return }
+        throw ConfigError("'\(name)' with a credentials file is not supported")
+    }
+
+    /// Filters the lines of a `<connection>` block; dropped option names go to `stripped`.
+    static func filteredConnectionBlock(_ text: String, stripped: inout Set<String>) throws -> String {
+        var kept: [String] = []
+        for (number, line) in text.components(separatedBy: "\n").enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix(";") { continue }
+            var tokens = try tokenize(trimmed, line: number + 1)
+            guard !tokens.isEmpty else { continue }
+            var name = tokens.removeFirst().lowercased()
+            if name.hasPrefix("--") { name.removeFirst(2) }
+            guard connectionDirectives.contains(name) else {
+                stripped.insert(name)
+                continue
+            }
+            try checkProxy(name, tokens)
+            kept.append(([name] + tokens.map(quote)).joined(separator: " "))
+        }
+        return kept.joined(separator: "\n")
+    }
 
     public struct Prepared: Sendable {
         public var text: String
@@ -242,53 +314,69 @@ public struct OpenVPNConfig: Equatable, Sendable {
     }
 
     /// Validates a self-contained config and appends the directives Bridge needs.
+    ///
+    /// OpenVPN only opens the utun and sets its address; the helper adds the routes
+    /// (`route-noexec`) and DNS from what the route-up hook and the management
+    /// interface report. OpenVPN's own DNS hook stays off: with `user` set it would keep
+    /// a root process that runs commands on behalf of the unprivileged OpenVPN.
     /// - Parameters:
     ///   - eventCommand: command run for route-up / down (gets " up" / " down" appended).
-    ///   - dnsCommand: single executable OpenVPN 2.7 runs as `dns-updown`; it receives the
-    ///     DNS servers and domains (pushed or configured) in its environment.
+    ///   - runAs: account OpenVPN switches to once the utun is up; it then keeps the
+    ///     interface and keys across reconnects (`persist-tun`, `persist-key`).
     public func prepared(tunnel: String, managementSocket: String, eventCommand: String,
-                         dnsCommand: String? = nil) throws -> Prepared {
+                         runAs: (user: String, group: String)? = nil) throws -> Prepared {
         var kept: [Directive] = []
         var stripped = Set<String>()
 
-        for directive in directives {
-            let name = directive.name
+        /// Throws for configs Bridge cannot run; false if the directive is dropped.
+        func allowed(_ name: String, args: [String], inline: String?) throws -> Bool {
             if name == "config" { throw ConfigError("Including other files ('config') is not supported") }
-            if name == "dev", let dev = directive.args.first?.lowercased(), dev.hasPrefix("tap") {
-                throw ConfigError("TAP (layer 2) tunnels are not supported on macOS; only 'dev tun' works")
-            }
-            if name == "dev-type", directive.args.first?.lowercased() == "tap" {
-                throw ConfigError("TAP (layer 2) tunnels are not supported on macOS; only 'dev tun' works")
-            }
-            if name == "setenv" {
-                // `setenv opt <directive>` marks a directive optional: judge the directive itself.
-                // Any other setenv only feeds the environment of the scripts OpenVPN runs, which
-                // are Bridge's own hooks running as root (think DYLD_INSERT_LIBRARIES): drop it.
-                guard directive.args.first?.lowercased() == "opt", directive.args.count > 1 else { continue }
-                let inner = directive.args[1].lowercased()
-                if Self.serverDirectives.contains(inner) {
-                    throw ConfigError("Server configs are not supported; Bridge connects as a client")
-                }
-                if Self.strippedDirectives.contains(inner) || inner.hasPrefix("management-") || inner == "config"
-                    || inner == "setenv" || Self.fileDirectives[inner] != nil {
-                    stripped.insert(inner)
-                    continue
-                }
-                kept.append(directive)
-                continue
-            }
             if Self.serverDirectives.contains(name) {
                 throw ConfigError("Server configs are not supported; Bridge connects as a client")
             }
-            if Self.strippedDirectives.contains(name) || name.hasPrefix("management-") {
+            if name == "dev", let dev = args.first?.lowercased(), dev.hasPrefix("tap") {
+                throw ConfigError("TAP (layer 2) tunnels are not supported on macOS; only 'dev tun' works")
+            }
+            if name == "dev-type", args.first?.lowercased() == "tap" {
+                throw ConfigError("TAP (layer 2) tunnels are not supported on macOS; only 'dev tun' works")
+            }
+            if Self.fileDirectives[name] != nil {
+                guard inline != nil || args.first == "[inline]" else {
+                    throw ConfigError("'\(name)' must be inline. Import the config with Bridge so files are embedded.")
+                }
+                return true
+            }
+            if name == "auth-user-pass", !args.isEmpty {
+                throw ConfigError("'auth-user-pass' must not reference a file here")
+            }
+            try Self.checkProxy(name, args)
+            guard Self.allowedDirectives.contains(name), !Self.ownedDirectives.contains(name) else {
                 stripped.insert(name)
+                return false
+            }
+            return true
+        }
+
+        for directive in directives {
+            let name = directive.name
+            if name == "setenv" {
+                // `setenv opt <directive>` marks a directive optional: judge the directive itself.
+                // Any other setenv only feeds the environment of the scripts OpenVPN runs, which
+                // are Bridge's own hooks (think DYLD_INSERT_LIBRARIES): drop it.
+                guard directive.args.first?.lowercased() == "opt", directive.args.count > 1 else { continue }
+                let inner = directive.args[1].lowercased()
+                if inner == "setenv" || inner == "connection" || Self.fileDirectives[inner] != nil {
+                    stripped.insert(inner)
+                    continue
+                }
+                if try allowed(inner, args: Array(directive.args.dropFirst(2)), inline: nil) { kept.append(directive) }
                 continue
             }
-            if Self.fileDirectives[name] != nil, directive.inline == nil, directive.args.first != "[inline]" {
-                throw ConfigError("'\(name)' must be inline. Import the config with Bridge so files are embedded.")
-            }
-            if name == "auth-user-pass", !directive.args.isEmpty {
-                throw ConfigError("'auth-user-pass' must not reference a file here")
+            guard try allowed(name, args: directive.args, inline: directive.inline) else { continue }
+            if name == "connection" {
+                guard let block = directive.inline else { stripped.insert(name); continue }
+                kept.append(Directive(name: name, inline: try Self.filteredConnectionBlock(block, stripped: &stripped)))
+                continue
             }
             kept.append(directive)
         }
@@ -302,27 +390,46 @@ public struct OpenVPNConfig: Equatable, Sendable {
         management-hold
         management-query-passwords
         script-security 2
+        route-noexec
         route-up \(Self.quote("\(eventCommand) up"))
         down \(Self.quote("\(eventCommand) down"))
         setenv BRIDGE_TUNNEL \(Self.quote(tunnel))
-        \(dnsCommand.map { "dns-updown \(Self.quote($0))" } ?? "dns-updown disable")
+        dns-updown disable
         verb 3
 
         """
+        if let runAs {
+            text += """
+            user \(Self.quote(runAs.user))
+            group \(Self.quote(runAs.group))
+            persist-tun
+            persist-key
+
+            """
+        }
 
         var warnings: [String] = []
-        let scripts = stripped.intersection(["up", "down", "route-up", "route-pre-down", "plugin",
-                                             "tls-verify", "ipchange", "client-connect", "learn-address"])
+        let scripts = stripped.intersection(Self.scriptDirectives)
         if !scripts.isEmpty {
             warnings.append("Ignored \(scripts.sorted().joined(separator: ", ")): Bridge never runs scripts from config files.")
         }
-        let windows = stripped.intersection(["block-outside-dns", "register-dns", "dhcp-release", "dhcp-renew",
-                                             "ip-win32", "route-method", "tap-sleep", "windows-driver"])
+        let windows = stripped.intersection(Self.windowsDirectives)
         if !windows.isEmpty {
             warnings.append("Ignored Windows-only options: \(windows.sorted().joined(separator: ", ")).")
         }
+        let other = stripped.subtracting(Self.scriptDirectives).subtracting(Self.windowsDirectives)
+            .subtracting(Self.ownedDirectives).filter { !$0.hasPrefix("management") }
+        if !other.isEmpty {
+            warnings.append("Ignored options Bridge does not pass to OpenVPN: \(other.sorted().joined(separator: ", ")).")
+        }
         return Prepared(text: text, warnings: warnings)
     }
+
+    /// Arguments of the config's own `dns …` directives.
+    public var dnsOptions: [[String]] { directives.filter { $0.name == "dns" }.map(\.args) }
+
+    /// Arguments of `pull-filter` directives (`accept|ignore|reject "text"`).
+    public var pullFilters: [[String]] { directives.filter { $0.name == "pull-filter" }.map(\.args) }
 
     // MARK: Rendering
 

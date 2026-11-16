@@ -10,12 +10,13 @@ final class AmneziaBackend: TunnelBackend {
     static let runDirectory = "/var/run/bridge"
     static let logDirectory = "/var/log/bridge"
 
-    let process: Process
+    let process: SpawnedProcess
     let interface: String
 
     var pid: Int32 { process.processIdentifier }
     var isRunning: Bool { process.isRunning }
-    var uapiPath: String { "\(Self.uapiDirectory)/\(interface).sock" }
+    var uapiPath: String { Self.uapiPath(interface) }
+    static func uapiPath(_ interface: String) -> String { "\(uapiDirectory)/\(interface).sock" }
 
     static var helperExecutablePath: String {
         (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath().path
@@ -38,87 +39,85 @@ final class AmneziaBackend: TunnelBackend {
         guard access(path, X_OK) == 0 else { throw HelperError("Backend \(path) is not executable") }
     }
 
-    private init(process: Process, interface: String) {
+    private init(process: SpawnedProcess, interface: String) {
         self.process = process
         self.interface = interface
     }
 
-    /// Starts the backend and waits until its utun interface and UAPI socket exist.
-    static func start(tunnel: String, onExit: @escaping (Int32) -> Void) throws -> AmneziaBackend {
-        let path = executablePath
-        try verifyExecutable(path)
-
-        let nameFile = "\(runDirectory)/\(tunnel).ifname"
-        unlink(nameFile)
-
+    /// Opens (creating if needed) a tunnel's log file for a backend's stdout/stderr.
+    static func openLog(tunnel: String, banner: String) -> FileHandle {
         let logPath = "\(logDirectory)/\(tunnel).log"
         if !FileManager.default.fileExists(atPath: logPath) {
             FileManager.default.createFile(atPath: logPath, contents: nil, attributes: [.posixPermissions: 0o644])
         }
-        let logHandle = FileHandle(forWritingAtPath: logPath)
-        logHandle?.seekToEndOfFile()
-        logHandle?.write("\n===== \(Date()) starting backend for '\(tunnel)' =====\n".data(using: .utf8)!)
+        guard let handle = FileHandle(forWritingAtPath: logPath) else { return FileHandle.nullDevice }
+        handle.seekToEndOfFile()
+        handle.write("\n===== \(Date()) \(banner) =====\n".data(using: .utf8)!)
+        return handle
+    }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["-f", "utun"]
-        process.environment = [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "WG_TUN_NAME_FILE": nameFile,
-            "LOG_LEVEL": "verbose",
-        ]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = logHandle ?? FileHandle.nullDevice
-        process.standardError = logHandle ?? FileHandle.nullDevice
-        process.terminationHandler = { onExit($0.processIdentifier) }
+    static func logTail(tunnel: String, lines: Int = 5) -> String {
+        (try? String(contentsOfFile: "\(logDirectory)/\(tunnel).log", encoding: .utf8))?
+            .split(separator: "\n").suffix(lines).joined(separator: "\n") ?? ""
+    }
 
+    /// Creates the utun and the UAPI socket as root, then starts the backend
+    /// unprivileged with both handed over as descriptors 3 and 4.
+    static func start(tunnel: String, onExit: @escaping (Int32) -> Void) throws -> AmneziaBackend {
+        let path = executablePath
+        try verifyExecutable(path)
+
+        let (tunFD, interface) = try Utun.open()
+        defer { close(tunFD) }  // the backend holds its own copy; the utun lives as long as it runs
+        // Root-owned and 0600: only the helper can configure the backend.
+        let socketPath = uapiPath(interface)
+        let uapiFD = try UnixSocket.listen(path: socketPath, mode: 0o600)
+        defer { close(uapiFD) }
+
+        let logHandle = openLog(tunnel: tunnel, banner: "starting backend for '\(tunnel)' on \(interface)")
+        defer { if logHandle !== FileHandle.nullDevice { try? logHandle.close() } }
+        let account = BackendAccount.current
+        let process: SpawnedProcess
         do {
-            try process.run()
+            process = try SpawnedProcess.spawn(
+                executable: path, arguments: ["-f", interface],
+                environment: [
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "WG_TUN_FD": "3",
+                    "WG_UAPI_FD": "4",
+                    "WG_PROCESS_FOREGROUND": "1",
+                    "LOG_LEVEL": "verbose",
+                ],
+                account: account, workingDirectory: runDirectory,
+                stdin: -1, stdout: logHandle.fileDescriptor,
+                stderr: logHandle.fileDescriptor, inherited: [tunFD, uapiFD], onExit: onExit)
         } catch {
-            throw HelperError("Could not start backend: \(error)")
+            unlink(socketPath)
+            throw error
         }
-        log("  backend pid \(process.processIdentifier) started")
+        log("  backend pid \(process.processIdentifier) started on \(interface) as \(account.name)")
 
-        func fail(_ message: String) -> HelperError {
-            if process.isRunning { terminate(pid: process.processIdentifier) }
-            let tail = (try? String(contentsOfFile: logPath, encoding: .utf8))?
-                .split(separator: "\n").suffix(5).joined(separator: "\n") ?? ""
-            return HelperError(tail.isEmpty ? message : "\(message)\nBackend log:\n\(tail)")
-        }
-
-        // 1. The kernel picks the utun number; the backend writes it to the name file.
-        var interface: String?
+        // The backend answers on the socket once it is up.
+        let backend = AmneziaBackend(process: process, interface: interface)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if let name = try? String(contentsOfFile: nameFile, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines), name.hasPrefix("utun") {
-                interface = name
-                break
+            if !process.isRunning { break }
+            if (try? backend.uapi(UAPI.getRequest, timeout: 1)) != nil {
+                log("  interface \(interface) ready")
+                return backend
             }
-            if !process.isRunning { throw fail("Backend exited during startup") }
             usleep(50_000)
         }
-        guard let interface else { throw fail("Backend did not report its utun interface within 5 s") }
-
-        // 2. Wait for the control socket.
-        let backend = AmneziaBackend(process: process, interface: interface)
-        let socketDeadline = Date().addingTimeInterval(5)
-        while Date() < socketDeadline {
-            var info = stat()
-            if stat(backend.uapiPath, &info) == 0 && (info.st_mode & S_IFMT) == S_IFSOCK { break }
-            if !process.isRunning { throw fail("Backend exited before creating its control socket") }
-            usleep(50_000)
-        }
-        guard FileManager.default.fileExists(atPath: backend.uapiPath) else {
-            throw fail("Backend did not create \(backend.uapiPath) within 5 s")
-        }
-        log("  interface \(interface) ready")
-        return backend
+        backend.stop()
+        let message = process.isRunning ? "Backend did not answer on \(socketPath) within 5 s"
+            : "Backend exited during startup"
+        let tail = logTail(tunnel: tunnel)
+        throw HelperError(tail.isEmpty ? message : "\(message)\nBackend log:\n\(tail)")
     }
 
     /// Sends one UAPI transaction and returns the raw response.
-    func uapi(_ request: String) throws -> String {
-        let fd = try UnixSocket.connect(path: uapiPath, timeout: 10)
+    func uapi(_ request: String, timeout: Int = 10) throws -> String {
+        let fd = try UnixSocket.connect(path: uapiPath, timeout: timeout)
         defer { close(fd) }
         try UnixSocket.writeAll(fd, request)
         return try UnixSocket.read(fd, until: "\n\n")
@@ -141,8 +140,9 @@ final class AmneziaBackend: TunnelBackend {
     }
 
     func stop() {
-        guard process.isRunning else { return }
-        terminate(pid: process.processIdentifier)
+        if process.isRunning { terminate(pid: process.processIdentifier) }
+        // The backend cannot remove the root-owned socket itself.
+        unlink(uapiPath)
     }
 }
 

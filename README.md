@@ -18,7 +18,7 @@
 
 Bridge started as a replacement for clients that silently drop newer AmneziaWG settings. It passes every parameter of AmneziaWG 1.0, 1.5 and 2.0 to the backend, and it refuses a config with a key it doesn't understand instead of quietly ignoring it.
 
-It needs no Network Extension, no Apple Developer account and no App Store. A small helper runs the VPN backends with administrator rights, much like Tunnelblick or Shimo do.
+It needs no Network Extension, no Apple Developer account and no App Store. A small helper does what macOS reserves for administrators (tunnel interfaces, routes, DNS, firewall), much like Tunnelblick or Shimo do. The VPN backends themselves, which talk to the servers, run without administrator rights. VLESS, Trojan and Hysteria 2 tunnels can also run as a local proxy, with no helper at all.
 
 <p align="center">
   <img src="docs/images/ui-menu.jpg" alt="Bridge menu with two connected tunnels" width="300">
@@ -72,7 +72,7 @@ The interface is in English, Russian and German, following the system language. 
 3. Open **Terminal** (Applications → Utilities), type `bash ` (with a space), drag **Install Bridge.command** from the disk image into the Terminal window and press Return. For example:
 
    ```bash
-   bash "/Volumes/Bridge 0.9.0/Install Bridge.command"
+   bash "/Volumes/Bridge 0.10.0/Install Bridge.command"
    ```
 
    The script copies Bridge into Applications, removes the “downloaded from the internet” flag so macOS opens it without a warning, and starts it.
@@ -272,17 +272,23 @@ bridge check file.ovpn            # validate without connecting
 Bridge.app / bridge CLI (your user)
         │  JSON over /var/run/bridge/helper.sock (admin users only)
         ▼
-bridge-helper (root, launchd)
-  ├─ amneziawg-go -f utun   configured over its UAPI socket; Bridge sets addresses,
-  │                         split default route (0/1 + 128/1), pinned server route
-  ├─ openvpn                driven via its management socket; Bridge answers password
-  │                         prompts and is its route-up and dns-updown hook
-  ├─ openconnect            started with the session cookie from the app's login
-  │                         (bridge-openconnect-auth, as the user); Bridge is its vpnc-script
-  ├─ xray run -c …          VLESS / Trojan / Hysteria 2: Xray creates the utun, Bridge writes its config from
-  │                         the link and sets routes, DNS and the pinned server route
+bridge-helper (root, launchd): utun interfaces, addresses, routes, DNS, firewall
+  ├─ amneziawg-go           as _bridge; gets the utun and its UAPI socket from the helper
+  │                         as descriptors; Bridge sets addresses, split default route
+  │                         (0/1 + 128/1) and the pinned server route
+  ├─ openvpn                opens the utun as root, then continues as _bridge (persist-tun);
+  │                         driven via its management socket; Bridge answers password prompts,
+  │                         adds its routes (route-noexec) and DNS from route-up and the PUSH_REPLY
+  ├─ openconnect            opens the utun, then continues as _bridge (--setuid); started with
+  │                         the session cookie from the app's login (bridge-openconnect-auth,
+  │                         as the user); Bridge is its vpnc-script
+  ├─ xray run               VLESS / Trojan / Hysteria 2, as _bridge; gets the utun from the helper
+  │                         and its configuration (written by Bridge from the link) on stdin
   ├─ DNS                    System Configuration dynamic store
   └─ pf anchor com.apple/bridge   kill switch and IPv6 leak protection
+
+Bridge.app, local proxy mode (your user, no helper)
+  └─ xray run               SOCKS5 + HTTP proxy on 127.0.0.1:<port>
 ```
 
 - DNS settings are temporary keys of the helper's session: if the helper dies, macOS removes them automatically. When a VPN's DNS has to apply system-wide, the original values are saved and restored.
@@ -290,10 +296,12 @@ bridge-helper (root, launchd)
 
 ## Security
 
-- Only root and members of the `admin` group can talk to the helper (checked with `getpeereid`).
+- Privilege separation: the backends, which parse what remote servers send, run as the unprivileged `_bridge` account (created by the installer). A bug in OpenVPN, OpenConnect, amneziawg-go or Xray gives an attacker that account, not root. Only interface, route, firewall and DNS changes stay in the root helper.
+- Only root and members of the `admin` group can control tunnels (checked with `getpeereid`). Backends may only report hook events, and only for their own tunnel (checked by the sending process, not by what it claims).
+- **Settings → General → Ask for my password before tunnel changes**: other programs running as you can then no longer connect, disconnect or change tunnels without a macOS password prompt. The helper only checks the authorization the app obtained; it never shows a dialog itself.
 - The helper refuses to run backends that aren't owned by root or are writable by others.
 - Share links are parsed by Bridge, and Bridge writes the Xray configuration itself: no user-supplied JSON reaches the root process.
-- Scripts from config files never run. `PreUp`/`PostUp`/… in WireGuard configs and `up`/`down`/`plugin`/`tls-verify`/… in OpenVPN configs are stripped. OpenVPN configs must be self-contained (no file references, no `config` includes) when they reach the helper.
+- Scripts from config files never run. `PreUp`/`PostUp`/… in WireGuard configs are stripped. OpenVPN options pass through an allowlist of client options (also inside `<connection>` blocks); anything else, such as `up`, `plugin` or `tls-verify`, is dropped with a note. OpenVPN configs must be self-contained (no file references, no `config` includes, no proxy credential files) when they reach the helper.
 - Keys and passwords never appear in logs. OpenVPN passwords live in the Keychain.
 
 ## Build from source

@@ -1,8 +1,22 @@
 import BridgeCore
 import Foundation
+import Security
 
 public enum HelperClient {
+    /// Sends a request. Tunnel changes carry the app's authorization; if the helper asks for a
+    /// password, macOS asks the user once and the request is sent again.
     public static func send(_ request: HelperRequest, timeout: Int = 90) throws -> HelperResponse {
+        guard HelperRequest.protectedCommands.contains(request.command) else { return try exchange(request, timeout: timeout) }
+        var request = request
+        request.authorization = ClientAuthorization.externalForm()
+        let response = try exchange(request, timeout: timeout)
+        guard response.errorCode == .authorizationRequired else { return response }
+        try ClientAuthorization.obtain()
+        request.authorization = ClientAuthorization.externalForm()
+        return try exchange(request, timeout: timeout)
+    }
+
+    private static func exchange(_ request: HelperRequest, timeout: Int) throws -> HelperResponse {
         let fd: Int32
         do {
             fd = try UnixSocket.connect(path: HelperProtocol.socketPath, timeout: timeout)
@@ -63,6 +77,61 @@ public enum HelperClient {
     public static func disconnect(_ name: String) throws {
         try call(HelperRequest(command: .down, name: name), timeout: 30)
     }
+
+    /// Whether the helper asks for a password before tunnel changes (nil if it does not answer).
+    public static func requiresAuthorization() -> Bool? {
+        guard let response = try? send(HelperRequest(command: .ping), timeout: 3), response.ok else { return nil }
+        return response.requireAuthorization ?? false
+    }
+
+    /// Changing this always needs the password.
+    public static func setRequiresAuthorization(_ on: Bool) throws {
+        var request = HelperRequest(command: .setRequireAuthorization)
+        request.flag = on
+        try call(request, timeout: 120)
+    }
+}
+
+/// The app's authorization for tunnel changes. One reference lives as long as the app,
+/// so the password is asked at most once per authorization timeout (5 minutes).
+enum ClientAuthorization {
+    private static let lock = NSLock()
+    private static var reference: AuthorizationRef?
+
+    private static func current() -> AuthorizationRef? {
+        lock.withLock {
+            if reference == nil {
+                var created: AuthorizationRef?
+                if AuthorizationCreate(nil, nil, [], &created) == errAuthorizationSuccess { reference = created }
+            }
+            return reference
+        }
+    }
+
+    static func externalForm() -> Data? {
+        guard let reference = current() else { return nil }
+        var form = AuthorizationExternalForm()
+        guard AuthorizationMakeExternalForm(reference, &form) == errAuthorizationSuccess else { return nil }
+        return withUnsafeBytes(of: &form) { Data($0) }
+    }
+
+    /// Asks macOS for `HelperProtocol.controlRight`, which shows the password dialog.
+    static func obtain() throws {
+        guard let reference = current() else { throw ClientError("Could not create an authorization") }
+        let status = HelperProtocol.controlRight.withCString { name -> OSStatus in
+            var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
+            return withUnsafeMutablePointer(to: &item) { pointer in
+                var rights = AuthorizationRights(count: 1, items: pointer)
+                return AuthorizationCopyRights(reference, &rights, nil,
+                                               [.interactionAllowed, .extendRights, .preAuthorize], nil)
+            }
+        }
+        switch status {
+        case errAuthorizationSuccess: return
+        case errAuthorizationCanceled: throw ClientError("Cancelled")
+        default: throw ClientError("macOS did not confirm the password (error \(status))")
+        }
+    }
 }
 
 /// What the connector needs from the user.
@@ -94,6 +163,9 @@ public enum Connector {
                                openConnectUI: OpenConnectLoginUI? = nil,
                                ask: (SecretPrompt) -> SecretAnswer?) throws -> TunnelStatus {
         let settings = settings ?? TunnelLibrary.settings(for: name)
+        if settings.isLocalProxy {
+            throw ClientError("“\(name)” is set to local proxy mode; connect it from the Bridge app")
+        }
         var secrets = TunnelSecrets()
         var rememberAuth = false
         var rememberKey = false

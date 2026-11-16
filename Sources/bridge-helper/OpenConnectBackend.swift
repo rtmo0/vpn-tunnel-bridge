@@ -69,7 +69,10 @@ final class OpenConnectBackend: TunnelBackend {
         logHandle?.seekToEndOfFile()
         logHandle?.write("\n===== \(Date()) starting OpenConnect for '\(tunnel)' =====\n".data(using: .utf8)!)
 
-        var arguments = ["--protocol", config.vpnProtocol.rawValue, "--cookie-on-stdin", "--non-inter",
+        // openconnect needs root only to open the utun: with --setuid it drops to the backend
+        // account right after, and its later script runs (reconnect, disconnect) are unprivileged.
+        var arguments = ["--setuid", BackendAccount.current.name,
+                         "--protocol", config.vpnProtocol.rawValue, "--cookie-on-stdin", "--non-inter",
                          "--servercert", fingerprint,
                          "--script", "\(AmneziaBackend.helperExecutablePath) openconnect-event",
                          "--reconnect-timeout", "300"]
@@ -280,12 +283,15 @@ final class OpenConnectRegistry {
         lock.withLock { backends[tunnel] = nil }
     }
 
-    func handleEvent(tunnel: String?, reason: String, environment env: [String: String]) -> HelperResponse {
+    /// - Parameter peerPID: the process that sent the event (from the socket, not from its environment).
+    func handleEvent(tunnel: String?, reason: String, environment env: [String: String],
+                     peerPID: pid_t?) -> HelperResponse {
         guard let tunnel, let backend = lock.withLock({ backends[tunnel] }) else {
             return .failure("Unknown OpenConnect tunnel")
         }
-        // Only the openconnect process of this tunnel may reconfigure it.
-        guard env["VPNPID"].flatMap(Int32.init) == backend.pid else {
+        // Only the openconnect process of this tunnel (through its script) may reconfigure it.
+        // Its environment cannot be trusted for that: openconnect runs unprivileged.
+        guard let peerPID, PeerAuth.isProcess(peerPID, descendantOf: backend.pid) else {
             log("  ignored OpenConnect event for '\(tunnel)' from another process")
             return .failure("Not this tunnel's process")
         }

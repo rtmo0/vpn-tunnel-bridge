@@ -149,6 +149,28 @@ public enum ProxyLink: Equatable, Sendable {
         return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys,
                                                                            .withoutEscapingSlashes])
     }
+
+    /// Xray configuration for a local proxy: SOCKS5 and HTTP on 127.0.0.1:`port` (Xray's
+    /// SOCKS inbound also answers HTTP proxy requests), no utun. Xray resolves the server itself.
+    /// - Parameter probePort: localhost port forwarded through the proxy for health checks.
+    public func xrayLocalProxyConfiguration(port: Int, probePort: UInt16,
+                                            profile: RoutingProfile? = nil) throws -> Data {
+        var outbound = xrayOutbound(address: host)
+        outbound["tag"] = "proxy"
+        var root: [String: Any] = [
+            "log": ["loglevel": "warning", "access": "none", "dnsLog": false],
+            "inbounds": [
+                ["tag": "local", "protocol": "socks", "listen": "127.0.0.1", "port": port,
+                 "settings": ["auth": "noauth", "udp": true, "ip": "127.0.0.1"]],
+                ["tag": "probe4", "protocol": "dokodemo-door", "listen": "127.0.0.1", "port": Int(probePort),
+                 "settings": ["address": "\(Self.probeTargets.ipv4)", "port": Int(Self.probePort), "network": "tcp"]],
+            ],
+            "outbounds": [outbound],
+        ]
+        profile?.apply(to: &root, directInterface: nil)
+        return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys,
+                                                                           .withoutEscapingSlashes])
+    }
 }
 
 /// What the helper sets up around a proxy tunnel, after Bridge settings are applied.

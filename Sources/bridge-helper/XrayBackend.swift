@@ -3,17 +3,17 @@ import Foundation
 
 /// One running Xray process for a VLESS, Trojan or Hysteria 2 tunnel.
 ///
-/// Xray creates the utun and turns its packets into proxy connections; Bridge
-/// owns routes, DNS and the firewall exactly as for WireGuard. Because Xray's
+/// The helper creates and addresses the utun and hands it to Xray, which runs
+/// unprivileged and turns the packets into proxy connections; Bridge owns
+/// routes, DNS and the firewall exactly as for WireGuard. Because Xray's
 /// TUN stack accepts every TCP connection locally, a working tunnel is
 /// recognised by a real HTTP answer fetched through Xray (the "probe"), not by
 /// a handshake.
 final class XrayBackend: TunnelBackend {
-    let process: Process
+    let process: SpawnedProcess
     let interface: String
     /// Unit number of the utun, also used to pick non-overlapping addresses.
     let unit: Int
-    let configPath: String
     private let probePorts: (ipv4: UInt16, ipv6: UInt16)
     private let lock = NSLock()
 
@@ -27,7 +27,7 @@ final class XrayBackend: TunnelBackend {
 
     static var isAvailable: Bool { (try? AmneziaBackend.verifyExecutable(executablePath)) != nil }
 
-    /// The utun's local IPv4 address (Xray assigns it: the address after the gateway).
+    /// The utun's local IPv4 address: the address after the gateway, as Xray itself would assign it.
     var localIPv4: String { Self.addresses(unit: unit).local }
     var gateway: String { Self.addresses(unit: unit).gateway }
     /// The utun's far side: the system resolver points here when a routing profile answers DNS.
@@ -57,12 +57,10 @@ final class XrayBackend: TunnelBackend {
     /// Called (on the prober thread) once the server is known to reach IPv6.
     var onIPv6Available: (() -> Void)?
 
-    private init(process: Process, interface: String, unit: Int, configPath: String,
-                 probePorts: (ipv4: UInt16, ipv6: UInt16)) {
+    private init(process: SpawnedProcess, interface: String, unit: Int, probePorts: (ipv4: UInt16, ipv6: UInt16)) {
         self.process = process
         self.interface = interface
         self.unit = unit
-        self.configPath = configPath
         self.probePorts = probePorts
     }
 
@@ -74,64 +72,76 @@ final class XrayBackend: TunnelBackend {
         let path = executablePath
         try AmneziaBackend.verifyExecutable(path)
 
-        guard let unit = (10...250).first(where: { if_nametoindex("utun\($0)") == 0 }) else {
-            throw HelperError("No free utun interface")
+        // The unit number picks the addresses, so ask for a specific free one.
+        var opened: (fd: Int32, name: String, unit: Int)?
+        for candidate in 10...250 where if_nametoindex("utun\(candidate)") == 0 {
+            if let utun = try? Utun.open(unit: candidate) {
+                opened = (utun.fd, utun.name, candidate)
+                break
+            }
         }
-        let interface = "utun\(unit)"
+        guard let (tunFD, interface, unit) = opened else { throw HelperError("No free utun interface") }
+        defer { close(tunFD) }  // Xray holds its own copy
+
+        // What Xray does itself when it creates the utun: MTU, then a point-to-point
+        // address (local = the address after the gateway).
+        let gateway = addresses(unit: unit).gateway
+        let gatewayAddress = String(gateway.split(separator: "/")[0])
+        try runChecked("/sbin/ifconfig", [interface, "inet", addresses(unit: unit).local, gatewayAddress,
+                                          "netmask", "255.255.255.252", "mtu", "1500", "up"])
+
         let probePorts = (ipv4: try freeLoopbackPort(), ipv6: try freeLoopbackPort())
-        let json = try link.xrayConfiguration(address: serverAddress, interface: interface,
-                                                gateway: addresses(unit: unit).gateway, mtu: 1500,
-                                                probePorts: probePorts, profile: profile,
+        let json = try link.xrayConfiguration(address: serverAddress, interface: interface, gateway: gateway,
+                                                mtu: 1500, probePorts: probePorts, profile: profile,
                                                 directInterface: directInterface)
-        // The file holds the user ID: root-only, and removed when the tunnel stops.
-        let configPath = "\(AmneziaBackend.runDirectory)/\(tunnel).xray.json"
-        unlink(configPath)
-        guard FileManager.default.createFile(atPath: configPath, contents: json,
-                                             attributes: [.posixPermissions: 0o600]) else {
-            throw HelperError("Could not write \(configPath)")
-        }
 
-        let logPath = "\(AmneziaBackend.logDirectory)/\(tunnel).log"
-        if !FileManager.default.fileExists(atPath: logPath) {
-            FileManager.default.createFile(atPath: logPath, contents: nil, attributes: [.posixPermissions: 0o644])
-        }
-        let logHandle = FileHandle(forWritingAtPath: logPath)
-        logHandle?.seekToEndOfFile()
-        logHandle?.write("\n===== \(Date()) starting Xray for '\(tunnel)' on \(interface) =====\n".data(using: .utf8)!)
+        // The configuration holds the user ID: it goes through a pipe, never to disk.
+        var pipeFDs: [Int32] = [-1, -1]
+        guard pipe(&pipeFDs) == 0 else { throw HelperError("pipe() failed: \(String(cString: strerror(errno)))") }
+        for fd in pipeFDs { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        let configReader = pipeFDs[0], configWriter = pipeFDs[1]
+        defer { close(configReader) }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["run", "-c", configPath]
-        // Keep Xray from looking for geo files or configs anywhere else.
-        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                               "XRAY_LOCATION_ASSET": profileAssets ?? AmneziaBackend.runDirectory]
-        process.currentDirectoryURL = URL(fileURLWithPath: AmneziaBackend.runDirectory)
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = logHandle ?? FileHandle.nullDevice
-        process.standardError = logHandle ?? FileHandle.nullDevice
-        process.terminationHandler = { onExit($0.processIdentifier) }
+        let logHandle = AmneziaBackend.openLog(tunnel: tunnel, banner: "starting Xray for '\(tunnel)' on \(interface)")
+        defer { if logHandle !== FileHandle.nullDevice { try? logHandle.close() } }
+        let account = BackendAccount.current
+        let process: SpawnedProcess
         do {
-            try process.run()
+            process = try SpawnedProcess.spawn(
+                executable: path, arguments: ["run", "-format", "json", "-c", "stdin:"],
+                // The utun arrives as descriptor 3; geo files only from the folder Bridge prepared.
+                environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "XRAY_TUN_FD": "3",
+                              "XRAY_LOCATION_ASSET": profileAssets ?? AmneziaBackend.runDirectory],
+                account: account, workingDirectory: AmneziaBackend.runDirectory,
+                stdin: configReader, stdout: logHandle.fileDescriptor, stderr: logHandle.fileDescriptor,
+                inherited: [tunFD], onExit: onExit)
         } catch {
-            unlink(configPath)
-            throw HelperError("Could not start Xray: \(error)")
+            close(configWriter)
+            throw error
         }
-        log("  xray pid \(process.processIdentifier) started")
+        // Written after the start: a large configuration would not fit in the pipe buffer.
+        DispatchQueue.global().async {
+            json.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    let written = write(configWriter, raw.baseAddress! + offset, raw.count - offset)
+                    if written < 0 && errno == EINTR { continue }
+                    if written <= 0 { break }
+                    offset += written
+                }
+            }
+            close(configWriter)
+        }
+        log("  xray pid \(process.processIdentifier) started on \(interface) as \(account.name)")
 
-        let backend = XrayBackend(process: process, interface: interface, unit: unit, configPath: configPath,
-                                   probePorts: probePorts)
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            if if_nametoindex(interface) != 0, Interface.hasIPv4(interface) { break }
-            if !process.isRunning { break }
-            usleep(50_000)
-        }
-        guard process.isRunning, if_nametoindex(interface) != 0 else {
+        let backend = XrayBackend(process: process, interface: interface, unit: unit, probePorts: probePorts)
+        // Xray reads its configuration and starts the inbounds; give it a moment to fail on a bad one.
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline, process.isRunning { usleep(50_000) }
+        guard process.isRunning else {
             backend.stop()
-            let tail = (try? String(contentsOfFile: logPath, encoding: .utf8))?
-                .split(separator: "\n").suffix(5).joined(separator: "\n") ?? ""
-            let message = process.isRunning ? "Xray did not create \(interface) within 5 s" : "Xray exited during startup"
-            throw HelperError(tail.isEmpty ? message : "\(message)\nXray log:\n\(tail)")
+            let tail = AmneziaBackend.logTail(tunnel: tunnel)
+            throw HelperError(tail.isEmpty ? "Xray exited during startup" : "Xray exited during startup\nXray log:\n\(tail)")
         }
         log("  interface \(interface) ready")
         return backend
@@ -165,7 +175,6 @@ final class XrayBackend: TunnelBackend {
     func stop() {
         lock.withLock { stopped = true }
         if process.isRunning { terminate(pid: process.processIdentifier) }
-        unlink(configPath)
     }
 
     // MARK: Probing
@@ -220,59 +229,11 @@ final class XrayBackend: TunnelBackend {
         }
     }
 
-    /// Sends a HEAD request through Xray's localhost forwarder. Only a real HTTP
-    /// answer from the far side counts.
-    static func probe(port: UInt16, timeout: TimeInterval) -> Bool {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = port.bigEndian
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let connected = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard connected == 0 else { return false }
-        let request = "HEAD / HTTP/1.1\r\nHost: one.one.one.one\r\nUser-Agent: Bridge\r\nConnection: close\r\n\r\n"
-        guard request.withCString({ send(fd, $0, strlen($0), 0) }) > 0 else { return false }
-        var buffer = [UInt8](repeating: 0, count: 64)
-        var received = 0
-        let deadline = Date().addingTimeInterval(timeout)
-        while received < 5, Date() < deadline {
-            let n = buffer.withUnsafeMutableBytes { recv(fd, $0.baseAddress! + received, 64 - received, 0) }
-            if n <= 0 { return false }
-            received += n
-        }
-        return received >= 5 && String(decoding: buffer[0..<5], as: UTF8.self) == "HTTP/"
-    }
+    static func probe(port: UInt16, timeout: TimeInterval) -> Bool { XrayProbe.check(port: port, timeout: timeout) }
 
-    /// A localhost TCP port that is free right now (the OS picks it).
     static func freeLoopbackPort() throws -> UInt16 {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw HelperError("socket() failed") }
-        defer { close(fd) }
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let ok = withUnsafeMutablePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, length) == 0 && getsockname(fd, $0, &length) == 0
-            }
-        }
-        guard ok else { throw HelperError("Could not find a free localhost port") }
-        return UInt16(bigEndian: addr.sin_port)
+        guard let port = XrayProbe.freeLoopbackPort() else { throw HelperError("Could not find a free localhost port") }
+        return port
     }
 }
 

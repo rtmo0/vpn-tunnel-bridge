@@ -29,6 +29,9 @@ final class ActiveTunnel {
     /// Xray tunnels with a routing profile: what is needed to start them again when the
     /// uplink changes (direct traffic is bound to the uplink interface by name).
     var xrayRequest: (text: String, profile: RoutingProfile, assets: String?)?
+    /// OpenVPN tunnels: what is needed to start OpenVPN again when it has to reopen its
+    /// utun, which it cannot do unprivileged (kept in the helper's memory while the tunnel is up).
+    var openVPNRequest: (text: String, secrets: TunnelSecrets, settings: TunnelSettings)?
     var directInterface: String?
     let startedAt = Date()
     var backend: TunnelBackend?
@@ -107,6 +110,9 @@ final class TunnelManager {
                 let status = try up(name: name, configText: text, secrets: request.secrets ?? TunnelSecrets(),
                                     settings: settings, profile: request.profile, profileAssets: request.profileAssets)
                 tunnels[name]?.settings = settings
+                if tunnels[name]?.kind == .openvpn {
+                    tunnels[name]?.openVPNRequest = (text, request.secrets ?? TunnelSecrets(), settings)
+                }
                 killSwitchHolds[name] = nil
                 updateFirewall()
                 return HelperResponse(ok: true, tunnels: [status])
@@ -121,8 +127,8 @@ final class TunnelManager {
                 downAll()
                 updateFirewall()
                 return HelperResponse(ok: true)
-            case .openvpnEvent, .openconnectEvent:
-                return .failure("Hook events are handled outside the manager queue")
+            case .openvpnEvent, .openconnectEvent, .setRequireAuthorization:
+                return .failure("Handled outside the manager queue")
             }
         } catch let error as CodedError {
             return .failure(error.message, code: error.code, detail: error.detail)
@@ -508,7 +514,7 @@ final class TunnelManager {
     }
 
     private func teardown(_ tunnel: ActiveTunnel) {
-        // Stop OpenVPN first: it removes its own routes and calls the down hook.
+        // Stop the backend first (OpenVPN's routes are removed with it).
         tunnel.backend?.stop()
         dns.remove(tunnel: tunnel.name)
         for route in tunnel.routes.reversed() { Routes.delete(route) }
@@ -524,12 +530,41 @@ final class TunnelManager {
         let servers = servers(of: tunnel)
         teardown(tunnel)
         tunnels[name] = nil
+        if restartOpenVPN(tunnel, backend: backend, servers: servers) { return }
         if tunnel.settings.killSwitch {
             killSwitchHolds[name] = servers
             log("  kill switch of '\(name)' keeps blocking traffic until it is reconnected or lifted")
         }
         saveState()
         updateFirewall()
+    }
+
+    /// OpenVPN exited because it had to reopen its utun (new settings from the server on a
+    /// reconnect), which it cannot do unprivileged: start it again with the same config and
+    /// credentials. The kill switch keeps blocking in between. Not with a one-time code,
+    /// which cannot be used twice.
+    private func restartOpenVPN(_ tunnel: ActiveTunnel, backend: TunnelBackend, servers: [String]) -> Bool {
+        guard let vpn = backend as? OpenVPNBackend, vpn.needsFreshStart, let request = tunnel.openVPNRequest,
+              request.secrets.challengeResponse == nil else { return false }
+        let name = tunnel.name
+        log("  starting OpenVPN for '\(name)' again with the server's new settings")
+        if request.settings.killSwitch {
+            killSwitchHolds[name] = servers
+            updateFirewall()
+        }
+        do {
+            _ = try up(name: name, configText: request.text, secrets: request.secrets, settings: request.settings)
+            tunnels[name]?.settings = request.settings
+            tunnels[name]?.openVPNRequest = request
+            killSwitchHolds[name] = nil
+            log("  '\(name)' is up again")
+        } catch {
+            log("  could not start '\(name)' again: \(error)")
+            if request.settings.killSwitch { log("  kill switch of '\(name)' keeps blocking traffic") }
+        }
+        saveState()
+        updateFirewall()
+        return true
     }
 
     // MARK: Firewall
@@ -615,6 +650,9 @@ final class TunnelManager {
         for tunnel in tunnels.values {
             guard let backend = tunnel.backend else { continue }
             if let vpn = backend as? OpenVPNBackend {
+                // OpenVPN keeps its utun (persist-tun) and does not touch routes on a restart:
+                // the server's route follows the new uplink here.
+                vpn.moveOutsideRoutes(to: uplink)
                 vpn.reconnect()
                 continue
             }

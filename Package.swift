@@ -33,7 +33,7 @@ let package = Package(
         .executableTarget(
             name: "bridge-helper",
             dependencies: ["BridgeCore"],
-            linkerSettings: [.linkedFramework("SystemConfiguration")]
+            linkerSettings: [.linkedFramework("SystemConfiguration"), .linkedFramework("Security")]
         ),
         .testTarget(
             name: "BridgeCoreTests",

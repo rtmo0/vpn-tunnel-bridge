@@ -9,7 +9,10 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 7
+    public static let version = 8
+    /// Authorization right a client must hold for tunnel changes when the helper asks for a
+    /// password (registered in the authorization database by the installer).
+    public static let controlRight = "com.rtmo0.bridge.control"
 }
 
 /// Secrets supplied by the client for a single connection attempt.
@@ -40,11 +43,17 @@ public struct HelperRequest: Codable, Sendable {
         case up, down, downAll, status, ping
         /// Lift a kill switch that keeps blocking after its tunnel dropped.
         case releaseKillSwitch
+        /// Turn "ask for a password before tunnel changes" on or off (`flag`).
+        case setRequireAuthorization
         /// Sent by OpenVPN's route-up/down hook (runs as root) back to the helper.
         case openvpnEvent
         /// Sent by OpenConnect's vpnc-script (Bridge's helper, run as root).
         case openconnectEvent
     }
+
+    /// Commands that change tunnels; they need `authorization` while the helper asks for a password.
+    public static let protectedCommands: Set<Command> = [.up, .down, .downAll, .releaseKillSwitch,
+                                                         .setRequireAuthorization]
 
     public var command: Command
     public var name: String?
@@ -56,6 +65,9 @@ public struct HelperRequest: Codable, Sendable {
     /// The routing profile named in `settings`, and the folder holding its geoip.dat / geosite.dat.
     public var profile: RoutingProfile?
     public var profileAssets: String?
+    /// AuthorizationExternalForm of the client's authorization (for `protectedCommands`).
+    public var authorization: Data?
+    public var flag: Bool?
 
     public init(command: Command, name: String? = nil, config: String? = nil, secrets: TunnelSecrets? = nil,
                 settings: TunnelSettings? = nil, event: String? = nil, environment: [String: String]? = nil,
@@ -76,6 +88,8 @@ public struct HelperRequest: Codable, Sendable {
 public enum HelperErrorCode: String, Codable, Sendable {
     case credentialsRequired, authenticationFailed, keyPassphraseRequired, keyPassphraseFailed
     case challengeRequired, alreadyConnected, notConnected, invalidConfig, unsupported
+    /// The helper asks for a password: obtain `HelperProtocol.controlRight` and send it along.
+    case authorizationRequired
 }
 
 public struct TunnelStatus: Codable, Sendable {
@@ -149,6 +163,8 @@ public struct HelperResponse: Codable, Sendable {
     /// Tunnels whose kill switch is still blocking traffic after they dropped.
     public var killSwitchHolds: [String]?
     public var capabilities: [TunnelKind]?
+    /// Whether tunnel changes need the user's password (reported by `ping`).
+    public var requireAuthorization: Bool?
 
     public init(ok: Bool, error: String? = nil, errorCode: HelperErrorCode? = nil, errorDetail: String? = nil,
                 tunnels: [TunnelStatus]? = nil, capabilities: [TunnelKind]? = nil) {

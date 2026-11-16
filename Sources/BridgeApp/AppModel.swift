@@ -47,6 +47,13 @@ final class AppModel: ObservableObject {
     private var refreshing = false
     private let work = DispatchQueue(label: "com.rtmo0.bridge.app.work", attributes: .concurrent)
 
+    init() {
+        // Local proxies are the app's own processes: they end with it.
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
+                                               queue: nil) { _ in LocalProxies.shared.stopAll() }
+        LocalProxies.shared.onExit = { [weak self] _ in DispatchQueue.main.async { self?.refresh() } }
+    }
+
     private func changed() {
         objectWillChange.send()
         onChange()
@@ -93,9 +100,11 @@ final class AppModel: ObservableObject {
                 statuses = full.tunnels
                 holds = full.killSwitchHolds
             }
+            let proxies = LocalProxies.shared.statuses()
             DispatchQueue.main.async {
                 self.refreshing = false
-                let active = statuses ?? previous.compactMap(\.status)
+                let proxyNames = Set(proxies.map(\.name))
+                let active = (statuses ?? previous.compactMap(\.status)).filter { !proxyNames.contains($0.name) } + proxies
                 var rows = saved.map { entry in
                     Row(name: entry.name, kind: entry.kind, status: active.first { $0.name == entry.name }, saved: true,
                         brand: brands[entry.name] ?? AddTunnelKind(entry.kind))
@@ -105,9 +114,13 @@ final class AppModel: ObservableObject {
                                     brand: AddTunnelKind(status.kind)))
                 }
                 if case .ready = availability {} else {
-                    rows = rows.map { Row(name: $0.name, kind: $0.kind, status: nil, saved: $0.saved, brand: $0.brand) }
+                    // Without the helper only local proxies (run by the app) can be up.
+                    rows = rows.map {
+                        Row(name: $0.name, kind: $0.kind, status: proxyNames.contains($0.name) ? $0.status : nil,
+                            saved: $0.saved, brand: $0.brand)
+                    }
                 }
-                if statuses != nil { self.updateRates(rows) }
+                if statuses != nil || !proxies.isEmpty { self.updateRates(rows) }
                 // Tunnels already up when the app started: assume their current settings apply.
                 for row in rows where row.status != nil && self.appliedSettings[row.name] == nil && row.saved {
                     self.appliedSettings[row.name] = TunnelLibrary.settings(for: row.name)
@@ -163,6 +176,11 @@ final class AppModel: ObservableObject {
     }
 
     func connect(_ name: String) {
+        let settings = TunnelLibrary.settings(for: name)
+        if settings.isLocalProxy, rows.first(where: { $0.name == name })?.kind.usesXray == true {
+            connectLocalProxy(name, settings: settings)
+            return
+        }
         guard helperReady else {
             let installed = helper != .notInstalled
             let title = installed ? String(localized: "Update the network helper?") : String(localized: "Install the network helper?")
@@ -181,7 +199,6 @@ final class AppModel: ObservableObject {
             if choice == 0 { installHelper { [weak self] in self?.connect(name) } }
             return
         }
-        let settings = TunnelLibrary.settings(for: name)
         userStopped.remove(name)
         setBusy(name, true)
         work.async {
@@ -211,8 +228,43 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Starts a tunnel as a local proxy, run by the app itself (no helper, no administrator rights).
+    private func connectLocalProxy(_ name: String, settings: TunnelSettings) {
+        userStopped.remove(name)
+        setBusy(name, true)
+        work.async {
+            var failure: String?
+            do {
+                let (text, _) = try TunnelLibrary.load(name)
+                var profile: RoutingProfile?
+                if let profileName = settings.routingProfile {
+                    let loaded = try RoutingProfiles.load(profileName)
+                    try RoutingProfiles.checkAssets(loaded, name: profileName)
+                    profile = loaded
+                }
+                try LocalProxies.shared.start(name: name, text: text, settings: settings, profile: profile)
+            } catch {
+                failure = error.localizedDescription
+            }
+            DispatchQueue.main.async {
+                if failure == nil { self.appliedSettings[name] = settings }
+                self.setBusy(name, false)
+                if let failure,
+                   Alerts.choose(String(localized: "Could not connect “\(name)”"), failure, buttons: [String(localized: "OK"), String(localized: "Show Log")], style: .warning) == 1 {
+                    NSWorkspace.shared.open(LocalProxies.logURL(name))
+                }
+                self.refresh()
+            }
+        }
+    }
+
     func disconnect(_ name: String) {
         userStopped.insert(name)
+        if LocalProxies.shared.isRunning(name) {
+            LocalProxies.shared.stop(name)
+            refresh()
+            return
+        }
         setBusy(name, true)
         work.async {
             var failure: String?
@@ -230,7 +282,11 @@ final class AppModel: ObservableObject {
         userStopped.insert(name)
         setBusy(name, true)
         work.async {
-            try? HelperClient.disconnect(name)
+            if LocalProxies.shared.isRunning(name) {
+                LocalProxies.shared.stop(name)
+            } else {
+                try? HelperClient.disconnect(name)
+            }
             DispatchQueue.main.async {
                 self.setBusy(name, false)
                 self.connect(name)
@@ -253,8 +309,10 @@ final class AppModel: ObservableObject {
 
     func disconnectAll() {
         userStopped.formUnion(rows.filter { $0.status != nil }.map(\.name))
+        let helperTunnels = rows.contains { $0.status != nil && !LocalProxies.shared.isRunning($0.name) }
         work.async {
-            _ = try? HelperClient.call(HelperRequest(command: .downAll))
+            LocalProxies.shared.stopAll()
+            if helperTunnels { _ = try? HelperClient.call(HelperRequest(command: .downAll)) }
             DispatchQueue.main.async { self.refresh() }
         }
     }
@@ -357,7 +415,11 @@ final class AppModel: ObservableObject {
         guard Alerts.confirm(String(localized: "Remove “\(name)”?"), String(localized: "The configuration and its saved passwords will be deleted. This can’t be undone."),
                              button: String(localized: "Remove"), destructive: true) else { return }
         userStopped.insert(name)
-        if rows.first(where: { $0.name == name })?.status != nil { try? HelperClient.disconnect(name) }
+        if LocalProxies.shared.isRunning(name) {
+            LocalProxies.shared.stop(name)
+        } else if rows.first(where: { $0.name == name })?.status != nil {
+            try? HelperClient.disconnect(name)
+        }
         do { try TunnelLibrary.remove(name) } catch { Alerts.show(String(localized: "Could not remove “\(name)”"), error.localizedDescription) }
         refresh()
     }

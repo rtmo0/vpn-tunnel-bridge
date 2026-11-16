@@ -23,6 +23,12 @@ mkdir -p "$(dirname "$SRC")" "$OUT"
 git clone --quiet --depth 1 --branch "$AWG_GO_VERSION" "$AWG_GO_REPO" "$SRC"
 
 cd "$SRC"
+
+# Bridge hands amneziawg-go a utun it created and configured (WG_TUN_FD) and runs it
+# without root, so it must not try to set the MTU itself (that needs root).
+sed -i '' 's/tun\.CreateTUNFromFile(file, device\.DefaultMTU)/tun.CreateTUNFromFile(file, 0)/' main.go
+grep -q 'tun.CreateTUNFromFile(file, 0)' main.go || { echo "Could not patch main.go (MTU)" >&2; exit 1; }
+
 for arch in arm64 amd64; do
   echo "==> Building for $arch"
   GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 \
@@ -32,6 +38,7 @@ done
 lipo -create -output "$OUT/amneziawg-go" "$OUT/amneziawg-go-arm64" "$OUT/amneziawg-go-amd64"
 rm -f "$OUT/amneziawg-go-arm64" "$OUT/amneziawg-go-amd64"
 codesign --force --sign - "$OUT/amneziawg-go" 2>/dev/null
-echo "$AWG_GO_VERSION" > "$OUT/amneziawg-go.version"
+# "+fd": built with the patch above; scripts/build.sh rebuilds older binaries.
+echo "$AWG_GO_VERSION+fd" > "$OUT/amneziawg-go.version"
 
 echo "==> $(lipo -info "$OUT/amneziawg-go")"

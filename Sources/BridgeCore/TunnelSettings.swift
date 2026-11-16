@@ -42,10 +42,19 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
     /// rule-based proxy / direct / block decisions and DNS made inside Xray.
     public var routingProfile: String?
 
+    /// VLESS, Trojan, Hysteria 2 only: instead of a system-wide VPN, run as a local
+    /// SOCKS5/HTTP proxy on 127.0.0.1:`proxyPort`. The app runs it as the user — no helper,
+    /// no administrator rights; routing, DNS and kill switch settings do not apply.
+    public var proxyPort: Int?
+    public static let defaultProxyPort = 10808
+
+    public var isLocalProxy: Bool { proxyPort != nil }
+
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
         case routing, networks, excludeLocalNetworks, dnsMode, dnsServers, splitDNSDomains, killSwitch, routingProfile
+        case proxyPort
     }
 
     /// Missing keys fall back to defaults, so settings saved by older versions keep working.
@@ -59,6 +68,7 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
         splitDNSDomains = try c.decodeIfPresent([String].self, forKey: .splitDNSDomains) ?? []
         killSwitch = try c.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? false
         routingProfile = try c.decodeIfPresent(String.self, forKey: .routingProfile)
+        proxyPort = try c.decodeIfPresent(Int.self, forKey: .proxyPort)
     }
 
     public var isDefault: Bool { self == TunnelSettings() }
@@ -81,6 +91,9 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
         }
         for domain in splitDNSDomains where domain.contains(" ") || domain.isEmpty {
             throw ConfigError("“\(domain)” is not a domain name")
+        }
+        if let proxyPort, !(1024...65535).contains(proxyPort) {
+            throw ConfigError("Use a proxy port between 1024 and 65535")
         }
     }
 
