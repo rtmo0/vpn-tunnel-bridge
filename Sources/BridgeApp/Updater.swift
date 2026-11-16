@@ -5,8 +5,9 @@ import Foundation
 /// Self-update from GitHub Releases.
 ///
 /// CI publishes `Bridge.zip` and `Bridge.zip.sha256` for every `v*` tag. The app
-/// checks the latest release, downloads the zip, verifies the checksum and the
-/// bundle, swaps itself in place and relaunches.
+/// checks the latest release, downloads the zip into a work folder in ~/Downloads,
+/// unpacks and verifies it there, swaps itself in place, relaunches and removes the
+/// work folder.
 final class Updater: NSObject, URLSessionDownloadDelegate {
     struct Release {
         let version: String
@@ -42,11 +43,33 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
+    /// The app icon read straight from the bundle, not through LaunchServices.
+    static var bundleIcon: NSImage? {
+        Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap(NSImage.init(contentsOf:))
+    }
+
+    private static let workPrefix = "Bridge-update-"
+
+    private static var downloads: URL {
+        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+    }
+
+    /// Removes work folders left behind by an update that was interrupted.
+    private static func removeLeftovers() {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: downloads.path)) ?? [] where name.hasPrefix(workPrefix) {
+            try? fm.removeItem(at: downloads.appendingPathComponent(name))
+        }
+    }
+
     private var timer: Timer?
     private var session: URLSession?
     private var pending: Release?
+    private var workDir: URL?
 
     func start() {
+        DispatchQueue.global(qos: .utility).async { Self.removeLeftovers() }
         let automatic = { UserDefaults.standard.bool(forKey: Preferences.autoCheckUpdates) }
         if automatic() { check(userInitiated: false) }
         let timer = Timer(timeInterval: 6 * 3600, repeats: true) { [weak self] _ in
@@ -142,6 +165,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         let notes = release.notes.trimmingCharacters(in: .whitespacesAndNewlines)
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
+        if let icon = Self.bundleIcon { alert.icon = icon }
         alert.messageText = String(localized: "Bridge \(release.version) is available")
         alert.informativeText = String(localized: "You have \(Self.currentVersion). Bridge will download the update, restart, and keep your tunnels connected.")
             + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
@@ -157,6 +181,15 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
 
     private func download(_ release: Release) {
         pending = release
+        let dir = Self.downloads.appendingPathComponent("\(Self.workPrefix)\(release.version)")
+        do {
+            try? FileManager.default.removeItem(at: dir)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            fail(String(localized: "Could not save the download: \(error.localizedDescription)"))
+            return
+        }
+        workDir = dir
         state = .downloading(release, progress: 0)
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
         self.session = session
@@ -172,7 +205,8 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         // The temporary file disappears when this method returns: move it first.
-        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("Bridge-update-\(UUID().uuidString).zip")
+        guard let dir = workDir else { return }
+        let zip = dir.appendingPathComponent("Bridge.zip")
         do {
             try FileManager.default.moveItem(at: location, to: zip)
         } catch {
@@ -180,7 +214,7 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
             return
         }
         guard let release = pending else { return }
-        DispatchQueue.global().async { self.verifyAndInstall(zip: zip, release: release) }
+        DispatchQueue.global().async { self.verifyAndInstall(zip: zip, in: dir, release: release) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -192,11 +226,13 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
         DispatchQueue.main.async {
             if let release = self.pending { self.state = .available(release) } else { self.state = .idle }
             self.pending = nil
+            if let dir = self.workDir { try? FileManager.default.removeItem(at: dir) }
+            self.workDir = nil
             Alerts.show(String(localized: "Update failed"), message)
         }
     }
 
-    private func verifyAndInstall(zip: URL, release: Release) {
+    private func verifyAndInstall(zip: URL, in dir: URL, release: Release) {
         do {
             if let checksumURL = release.checksumURL {
                 let expected = String(decoding: try Data(contentsOf: checksumURL), as: UTF8.self)
@@ -205,10 +241,9 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
                 guard expected == actual else { throw UpdateError(String(localized: "Checksum mismatch: the download is corrupted.")) }
             }
 
-            let staging = FileManager.default.temporaryDirectory.appendingPathComponent("Bridge-update-\(UUID().uuidString)")
-            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-            try run("/usr/bin/ditto", ["-x", "-k", zip.path, staging.path])
-            let newApp = staging.appendingPathComponent("Bridge.app")
+            try run("/usr/bin/ditto", ["-x", "-k", zip.path, dir.path])
+            try? FileManager.default.removeItem(at: zip)
+            let newApp = dir.appendingPathComponent("Bridge.app")
             guard let bundle = Bundle(url: newApp),
                   bundle.bundleIdentifier == Bundle.main.bundleIdentifier else {
                 throw UpdateError(String(localized: "The downloaded archive does not contain Bridge."))
@@ -216,21 +251,27 @@ final class Updater: NSObject, URLSessionDownloadDelegate {
             try run("/usr/bin/codesign", ["--verify", "--deep", newApp.path])
             DispatchQueue.main.async {
                 self.state = .installing
-                self.replaceAndRelaunch(with: newApp)
+                self.replaceAndRelaunch(with: newApp, workDir: dir)
             }
         } catch {
             fail("\(error)")
         }
     }
 
-    /// A detached shell waits for this process to exit, swaps the bundle and reopens it.
-    private func replaceAndRelaunch(with newApp: URL) {
+    /// A detached shell waits for this process to exit, swaps the bundle, re-registers it
+    /// with LaunchServices (so the Dock, Finder and alerts pick up the new icon), reopens it
+    /// and deletes the work folder from ~/Downloads.
+    private func replaceAndRelaunch(with newApp: URL, workDir: URL) {
         let current = Bundle.main.bundleURL
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let script = """
         while /bin/kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do /bin/sleep 0.2; done
         /bin/rm -rf \(q(current.path)) && /usr/bin/ditto \(q(newApp.path)) \(q(current.path)) \
-          && /usr/bin/xattr -dr com.apple.quarantine \(q(current.path)) 2>/dev/null; /usr/bin/open \(q(current.path))
+          && /usr/bin/xattr -dr com.apple.quarantine \(q(current.path)) 2>/dev/null
+        /usr/bin/touch \(q(current.path))
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f \(q(current.path)) 2>/dev/null
+        /usr/bin/open \(q(current.path))
+        /bin/rm -rf \(q(workDir.path))
         """
         let writable = FileManager.default.isWritableFile(atPath: current.deletingLastPathComponent().path)
         let process = Process()

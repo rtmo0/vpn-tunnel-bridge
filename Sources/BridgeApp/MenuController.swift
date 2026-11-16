@@ -46,6 +46,9 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         statusItem.menu = menu
         SettingsWindow.updater = updater
+        // Load the icon from the bundle ourselves: after an in-place update LaunchServices
+        // may still hold a stale entry and hand alerts the generic white app icon.
+        if let icon = Updater.bundleIcon { NSApp.applicationIconImage = icon }
         model.onChange = { [weak self] in self?.update() }
         updater.onChange = { [weak self] in self?.update() }
         update()
