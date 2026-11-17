@@ -540,15 +540,8 @@ struct TunnelDetail: View {
                 Text(routingHint).font(.caption).foregroundStyle(.secondary)
             }
             if settings.routing == .onlyListed || settings.routing == .allExceptListed {
-                VStack(alignment: .leading, spacing: 4) {
-                    TextField("Networks", text: $networksText, prompt: Text("10.0.0.0/8, 192.168.50.0/24, 203.0.113.7"),
-                              axis: .vertical)
-                        .lineLimit(2...6)
-                        .font(.body.monospaced())
-                        .focused($focus, equals: .networks)
-                        .onSubmit(commit)
-                    fieldError(networksError)
-                }
+                listField("Networks", text: $networksText, prompt: "10.0.0.0/8, 192.168.50.0/24, 203.0.113.7",
+                          field: .networks, error: networksError)
             }
             Toggle("Keep local networks off the VPN", isOn: $settings.excludeLocalNetworks)
             Toggle(isOn: $settings.killSwitch) {
@@ -650,22 +643,11 @@ struct TunnelDetail: View {
                     Text("Don't change system DNS").tag(TunnelSettings.DNSMode.system)
                 }
                 if settings.dnsMode == .custom {
-                    VStack(alignment: .leading, spacing: 4) {
-                        TextField("Servers", text: $dnsText, prompt: Text("1.1.1.1, 9.9.9.9"))
-                            .font(.body.monospaced())
-                            .focused($focus, equals: .dns)
-                            .onSubmit(commit)
-                        fieldError(dnsError)
-                    }
+                    listField("Servers", text: $dnsText, prompt: "1.1.1.1, 9.9.9.9", field: .dns, error: dnsError)
                 }
                 if settings.dnsMode != .system {
-                    VStack(alignment: .leading, spacing: 4) {
-                        TextField("Only for domains", text: $domainsText, prompt: Text("corp.example, internal.lan"))
-                            .font(.body.monospaced())
-                            .focused($focus, equals: .domains)
-                            .onSubmit(commit)
-                        fieldError(domainsError)
-                    }
+                    listField("Only for domains", text: $domainsText, prompt: "corp.example, internal.lan",
+                              field: .domains, error: domainsError)
                 }
             } header: {
                 Text("DNS")
@@ -675,6 +657,25 @@ struct TunnelDetail: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    /// A comma-separated list: the label on its own line, the whole list below it,
+    /// left-aligned and wrapping, so long lists stay readable.
+    private func listField(_ title: LocalizedStringKey, text: Binding<String>, prompt: String,
+                           field: Field, error: String?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+            TextField(title, text: text, prompt: Text(prompt), axis: .vertical)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.leading)
+                .lineLimit(1...6)
+                .font(.callout.monospaced())
+                .focused($focus, equals: field)
+                .onSubmit(commit)
+            fieldError(error)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder private func fieldError(_ message: String?) -> some View {
@@ -795,6 +796,7 @@ struct TunnelDetail: View {
         text.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == " " || $0 == ";" })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+            .reduce(into: [String]()) { list, item in if !list.contains(item) { list.append(item) } }
     }
 }
 

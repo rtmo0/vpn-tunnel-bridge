@@ -114,6 +114,15 @@ final class DNSManager {
 
     private func removeLocked(tunnel: String, flush: Bool) {
         if override?.tunnel == tunnel { restoreOverrideLocked() }
+        if displaced?.tunnel == tunnel { displaced = nil }
+        // Another tunnel's override sits on this tunnel's service, which is going away:
+        // drop it without restoring and move it to the next primary service.
+        if let current = override, current.serviceID == Self.serviceID(tunnel) {
+            displaced = (current.tunnel, current.servers)
+            override = nil
+            try? FileManager.default.removeItem(atPath: Self.overridePath)
+            scheduleDisplacedLocked()
+        }
         let base = "State:/Network/Service/Bridge-\(tunnel)"
         var removed = false
         for key in ["\(base)/DNS", "\(base)/IPv4", "\(base)/IPv6"] where SCDynamicStoreCopyValue(store, key as CFString) != nil {
@@ -139,6 +148,8 @@ final class DNSManager {
     }
 
     private var override: Override?
+    /// An override whose service (another Bridge tunnel) went away; re-applied on the next primary.
+    private var displaced: (tunnel: String, servers: [String])?
     private var watchdog: DispatchSourceTimer?
     private static let overridePath = "/var/run/bridge/dns-override.plist"
 
@@ -149,6 +160,52 @@ final class DNSManager {
 
     private func keys(_ service: String) -> (state: String, setup: String) {
         ("State:/Network/Service/\(service)/DNS", "Setup:/Network/Service/\(service)/DNS")
+    }
+
+    private static func serviceID(_ tunnel: String) -> String { "Bridge-\(tunnel)" }
+
+    /// The Bridge tunnel that publishes `service`, if it is one of ours (a full tunnel).
+    private static func bridgeTunnel(ofService service: String) -> String? {
+        service.hasPrefix("Bridge-") ? String(service.dropFirst("Bridge-".count)) : nil
+    }
+
+    /// Keys a service may have: our own services have only a temporary State key,
+    /// never a Setup key.
+    private func overrideKeys(_ service: String) -> [String] {
+        let (state, setup) = keys(service)
+        return Self.bridgeTunnel(ofService: service) == nil ? [state, setup] : [state]
+    }
+
+    /// Writes a DNS key. Keys of our own services stay temporary, so configd still
+    /// removes them if the helper crashes.
+    private func write(_ key: String, _ value: CFPropertyList, service: String) {
+        if Self.bridgeTunnel(ofService: service) != nil {
+            SCDynamicStoreRemoveValue(store, key as CFString)
+            if !SCDynamicStoreAddTemporaryValue(store, key as CFString, value) {
+                log("  ! could not publish \(key): \(String(cString: SCErrorString(SCError())))")
+            }
+        } else {
+            SCDynamicStoreSetValue(store, key as CFString, value)
+        }
+    }
+
+    /// Re-applies a displaced override once configd has picked the next primary service.
+    private func scheduleDisplacedLocked() {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            self.applyDisplacedLocked()
+        }
+        startWatchdog()
+    }
+
+    private func applyDisplacedLocked() {
+        guard override == nil, let pending = displaced, primaryServiceID() != nil else { return }
+        displaced = nil
+        if let warning = overridePrimaryLocked(tunnel: pending.tunnel, servers: pending.servers) {
+            log("  ! \(warning)")
+        }
     }
 
     private static func encode(_ value: CFPropertyList?) -> Data? {
@@ -165,16 +222,17 @@ final class DNSManager {
         }
         guard let service = primaryServiceID() else { return "No primary network service; DNS left unchanged." }
         let (stateKey, setupKey) = keys(service)
+        let ours = Self.bridgeTunnel(ofService: service) != nil
         if override == nil {
             override = Override(tunnel: tunnel, serviceID: service, servers: servers,
                                 originalState: Self.encode(SCDynamicStoreCopyValue(store, stateKey as CFString)),
-                                originalSetup: Self.encode(SCDynamicStoreCopyValue(store, setupKey as CFString)))
+                                originalSetup: ours ? nil : Self.encode(SCDynamicStoreCopyValue(store, setupKey as CFString)))
             persistOverride()
         }
-        for key in [stateKey, setupKey] {
+        for key in overrideKeys(service) {
             var dns = (SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any]) ?? [:]
             dns["ServerAddresses"] = servers
-            SCDynamicStoreSetValue(store, key as CFString, dns as CFDictionary)
+            write(key, dns as CFDictionary, service: service)
         }
         active[tunnel] = servers
         log("  DNS \(servers.joined(separator: ", ")) for all names (no domains from the server; service \(service))")
@@ -186,20 +244,32 @@ final class DNSManager {
     private func restoreOverrideLocked() {
         guard let saved = override else { return }
         let (stateKey, setupKey) = keys(saved.serviceID)
-        for (key, original) in [(stateKey, saved.originalState), (setupKey, saved.originalSetup)] {
-            if let value = Self.decode(original) {
-                SCDynamicStoreSetValue(store, key as CFString, value)
-            } else {
-                SCDynamicStoreRemoveValue(store, key as CFString)
+        if let owner = Self.bridgeTunnel(ofService: saved.serviceID) {
+            // Our own tunnel's service: put its DNS back only while that tunnel is still up,
+            // otherwise the restored key would outlive it.
+            if active[owner] != nil, let value = Self.decode(saved.originalState) {
+                write(stateKey, value, service: saved.serviceID)
+            }
+        } else {
+            for (key, original) in [(stateKey, saved.originalState), (setupKey, saved.originalSetup)] {
+                if let value = Self.decode(original) {
+                    SCDynamicStoreSetValue(store, key as CFString, value)
+                } else {
+                    SCDynamicStoreRemoveValue(store, key as CFString)
+                }
             }
         }
         override = nil
         active[saved.tunnel] = nil
         try? FileManager.default.removeItem(atPath: Self.overridePath)
-        watchdog?.cancel()
-        watchdog = nil
+        if displaced == nil { stopWatchdogLocked() }
         log("  system DNS restored (service \(saved.serviceID))")
         flushDNSCache()
+    }
+
+    private func stopWatchdogLocked() {
+        watchdog?.cancel()
+        watchdog = nil
     }
 
     private func persistOverride() {
@@ -217,7 +287,10 @@ final class DNSManager {
             guard let self else { return }
             self.lock.lock()
             defer { self.lock.unlock() }
-            guard let saved = self.override else { return }
+            guard let saved = self.override else {
+                if self.displaced != nil { self.applyDisplacedLocked() } else { self.stopWatchdogLocked() }
+                return
+            }
             let service = self.primaryServiceID()
             if service != saved.serviceID {
                 log("  primary network service changed; moving DNS override")
