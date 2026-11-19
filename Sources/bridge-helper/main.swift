@@ -96,6 +96,16 @@ OpenVPNRegistry.shared.onRoutesChanged = {
     }
 }
 OpenConnectRegistry.shared.onChanged = { manager.queue.async { manager.openConnectChanged() } }
+// Addresses of direct sites are routed before the DNS answer reaches the app that asked
+// (bounded wait, in case the manager is busy connecting a tunnel).
+DirectDNSProxy.shared.onAnswer = { name, addresses in
+    let done = DispatchSemaphore(value: 0)
+    manager.queue.async {
+        manager.directSitesAnswer(name: name, addresses: addresses)
+        done.signal()
+    }
+    _ = done.wait(timeout: .now() + 1.5)
+}
 let installedBuild = (try? String(contentsOfFile: URL(fileURLWithPath: AmneziaBackend.helperExecutablePath)
     .deletingLastPathComponent().appendingPathComponent("version").path, encoding: .utf8))?
     .trimmingCharacters(in: .whitespacesAndNewlines)

@@ -166,12 +166,15 @@ final class DNSManager {
 
     private static func directKey(_ tunnel: String) -> String { "State:/Network/Service/BridgeDirect-\(tunnel)/DNS" }
 
-    /// Sends DNS for `domains` (and their subdomains) to `servers` of the physical network.
-    func applyDirect(tunnel: String, domains: [String], servers: [String]) {
+    /// Sends DNS for `domains` (and their subdomains) to `servers` (on `port`, if not 53).
+    /// The domains are not added to the search list: they are not short names.
+    func applyDirect(tunnel: String, domains: [String], servers: [String], port: UInt16? = nil) {
         lock.lock()
         defer { lock.unlock() }
         let key = Self.directKey(tunnel)
-        let value: [String: Any] = ["ServerAddresses": servers, "SupplementalMatchDomains": domains]
+        var value: [String: Any] = ["ServerAddresses": servers, "SupplementalMatchDomains": domains,
+                                    "SupplementalMatchDomainsNoSearch": 1]
+        if let port { value["ServerPort"] = Int(port) }
         if let current = SCDynamicStoreCopyValue(store, key as CFString) as? NSDictionary,
            current.isEqual(to: value) { return }
         SCDynamicStoreRemoveValue(store, key as CFString)

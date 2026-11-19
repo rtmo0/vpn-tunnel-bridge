@@ -3,9 +3,11 @@ import Foundation
 
 /// Routes the addresses of direct sites around one tunnel, through the physical uplink.
 ///
-/// Each pass: DNS for the domains goes to the physical network's DNS server (so the
-/// helper and the browser get the same answers), the domains are resolved, and every
-/// address gets a host route via the uplink. Addresses stay routed for a while after
+/// DNS for the domains and all their subdomains goes to `DirectDNSProxy`, which asks
+/// the physical network's DNS through the physical interface and reports every address
+/// it hands out; each gets a host route via the uplink before the app can connect.
+/// The domain and its `www.` host are also looked up every few minutes, so the main
+/// addresses are routed even before anything asks. Addresses stay routed for a while after
 /// they drop out of the answers, as browsers keep connections and their own DNS cache.
 /// Runs on the manager queue; lookups run in the background.
 final class DirectSitesRouter {
@@ -34,7 +36,6 @@ final class DirectSitesRouter {
 
     private var seen: [IPAddress: Seen] = [:]
     private var unresolved: Set<String> = []
-    private var dnsServers: [IPAddress] = []
     private var timer: DispatchSourceTimer?
     private var resolving = false
     private var again = false
@@ -88,7 +89,6 @@ final class DirectSitesRouter {
         let domains = self.domains
         forget(except: Set(domains))
         guard !domains.isEmpty else {
-            dnsServers = []
             DNSManager.shared.removeDirect(tunnel: tunnel)
             reconcile()
             return
@@ -96,19 +96,30 @@ final class DirectSitesRouter {
         guard let uplink = Routes.uplink(excluding: tunnelInterfaces()), let interface = uplink.interface,
               !Routes.isVirtual(interface) else {
             log("  direct sites of '\(tunnel)': no physical network, leaving them in the tunnel")
-            dnsServers = []
             DNSManager.shared.removeDirect(tunnel: tunnel)
             reconcile()
             return
         }
 
-        // The physical network's DNS answers these domains; reach it outside the tunnel first.
-        let servers = DNSManager.shared.physicalServers(interface: interface)
-        dnsServers = servers.compactMap(IPAddress.init)
+        // The physical network's DNS answers these domains, asked through the proxy on that interface.
+        var servers = DNSManager.shared.physicalServers(interface: interface)
+        if servers.isEmpty, let gateway = uplink.gateway { servers = [gateway] }
         reconcile()
-        DNSManager.shared.applyDirect(tunnel: tunnel, domains: domains, servers: servers)
-        if servers.isEmpty {
-            log("  direct sites of '\(tunnel)': no DNS server on \(interface); using the system resolver")
+        let proxy = DirectDNSProxy.shared
+        let allowIPv6 = carriesIPv6() && Routes.uplinkIPv6() != nil
+        let next = DirectDNSProxy.Upstream(servers: servers, interface: interface, allowIPv6: allowIPv6)
+        if proxy.upstream != next {
+            proxy.upstream = next
+            log("  direct sites of '\(tunnel)': DNS via \(servers.joined(separator: ", ")) on \(interface)"
+                + (allowIPv6 ? "" : ", IPv4 only"))
+        }
+        if !servers.isEmpty, proxy.start() {
+            DNSManager.shared.applyDirect(tunnel: tunnel, domains: domains, servers: [DirectDNSProxy.address],
+                                          port: DirectDNSProxy.port)
+        } else {
+            // Without the proxy the system resolver answers (through the tunnel's DNS).
+            DNSManager.shared.removeDirect(tunnel: tunnel)
+            log("  direct sites of '\(tunnel)': no DNS proxy; only the domains and www. hosts are routed")
         }
 
         resolving = true
@@ -135,11 +146,15 @@ final class DirectSitesRouter {
         }
     }
 
-    private func merge(_ answers: [String: [IPAddress]]) {
+    private func merge(_ answers: [String: [IPAddress]], replacesUnresolved: Bool = true) {
         let now = Date()
         let protected = protectedAddresses()
         for (domain, ips) in answers {
-            if ips.isEmpty { unresolved.insert(domain) } else { unresolved.remove(domain) }
+            if ips.isEmpty {
+                if replacesUnresolved { unresolved.insert(domain) }
+            } else {
+                unresolved.remove(domain)
+            }
             for ip in ips where DirectSites.isRoutable(ip) && !protected.contains("\(ip)") {
                 var entry = seen[ip] ?? Seen(domains: [], lastSeen: now)
                 entry.domains.insert(domain)
@@ -153,6 +168,21 @@ final class DirectSitesRouter {
             let keep = seen.sorted { $0.value.lastSeen > $1.value.lastSeen }.prefix(Self.maxAddresses)
             seen = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
         }
+    }
+
+    /// The domain in the list that `name` belongs to (itself or a subdomain).
+    func domain(for name: String) -> String? {
+        let name = name.lowercased()
+        return domains.filter { name == $0 || name.hasSuffix("." + $0) }.max { $0.count < $1.count }
+    }
+
+    /// Addresses the DNS proxy just handed out for `name`: route them now.
+    func learn(name: String, addresses: [IPAddress]) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !stopped, let domain = domain(for: name) else { return }
+        let fresh = addresses.prefix(DirectSites.maxAddressesPerDomain)
+        merge([domain: Array(fresh)], replacesUnresolved: false)
+        reconcile()
     }
 
     /// Drops addresses of domains that are no longer in the list.
@@ -179,13 +209,6 @@ final class DirectSitesRouter {
         let protected = protectedAddresses()
         for ip in seen.keys.sorted(by: { "\($0)" < "\($1)" }) where !protected.contains("\(ip)") {
             if let route = entry(ip) { wanted.append(route) }
-        }
-        // A DNS server reached through the tunnel (not on the local network) is pinned too.
-        for ip in dnsServers where !ip.isIPv6 {
-            guard let path = Routes.lookup("\(ip)", ipv6: false), let interface = path.interface,
-                  Routes.isVirtual(interface) || routes.contains(where: { $0.destination == "\(ip)" }),
-                  let route = entry(ip), !wanted.contains(route) else { continue }
-            wanted.append(route)
         }
 
         let wantedSet = Set(wanted)

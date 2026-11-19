@@ -203,6 +203,11 @@ final class TunnelManager {
         router.start()
     }
 
+    /// The DNS proxy handed out addresses for a direct site: route them around the tunnel.
+    func directSitesAnswer(name: String, addresses: [IPAddress]) {
+        for tunnel in tunnels.values { tunnel.directSites?.learn(name: name, addresses: addresses) }
+    }
+
     /// A tunnel learned whether it takes all traffic (OpenVPN, OpenConnect): follow with direct sites.
     func refreshDirectSites() {
         for tunnel in tunnels.values { tunnel.directSites?.refresh() }

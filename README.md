@@ -182,10 +182,10 @@ Menu → **Settings…** (⌘,):
 
 Some sites refuse foreign addresses or are simply faster without the VPN. List them in **Settings → Direct Sites** (for every tunnel that takes all traffic) or as domains in a tunnel's *All traffic except these networks* list (for that tunnel).
 
-- Bridge sends DNS for these domains (and their subdomains) to your Wi-Fi or Ethernet DNS server, looks them up there, and routes the addresses around the VPN through the physical network. It looks again every 5 minutes and when the network changes; addresses stay routed for 6 hours after they drop out of the answers.
+- DNS for these domains and **all their subdomains** goes to a small DNS proxy in the helper (127.0.0.1:53535). It asks your Wi-Fi or Ethernet DNS server directly through that interface, and routes every address in the answer around the VPN before the answer reaches the app. So `api.example.com` goes direct as soon as anything looks it up. The domain and its `www.` host are also looked up every 5 minutes and when the network changes; addresses stay routed for 6 hours after they were last seen.
 - The tunnel's details show each site and how many of its addresses go direct.
-- It is **best effort**: routes know addresses, not names. A site may also load from addresses its name doesn't return (CDNs, DNS over HTTPS in the browser), and another site on a shared address goes direct too. Only the domain and its `www.` host get routes; list other subdomains (`lk.example.com`) explicitly.
-- IPv6 addresses go direct only if the tunnel and the network both have IPv6. If the tunnel has no IPv6, Bridge blocks IPv6 anyway and browsers use IPv4.
+- It is **best effort**: routes know addresses, not names. A site may also load from addresses its name doesn't return (CDNs, DNS over HTTPS in the browser), and another site on a shared address goes direct too. Sites often load from other domains too (a site on `kinopoisk.ru` also uses `yandex.net` and `yastatic.net`): add those as well.
+- IPv6 addresses go direct only if the tunnel and the network both have IPv6. Otherwise the proxy answers these domains with IPv4 only, so apps don't try IPv6 through the VPN.
 - Off while the tunnel's kill switch is on. VLESS, Trojan and Hysteria 2 tunnels can use routing profiles instead, which decide by name.
 
 ### Kill switch
