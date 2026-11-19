@@ -92,6 +92,7 @@ OpenVPNRegistry.shared.onRoutesChanged = {
     manager.queue.async {
         manager.ensureServerPins()
         manager.updateFirewall()
+        manager.refreshDirectSites()
     }
 }
 OpenConnectRegistry.shared.onChanged = { manager.queue.async { manager.openConnectChanged() } }

@@ -158,7 +158,7 @@ Select a tunnel on the left. On the right:
   - *As in configuration*: AllowedIPs, or the routes the OpenVPN server pushes.
   - *All traffic*: everything through the VPN.
   - *Only these networks* (split tunnelling): only listed networks use the VPN.
-  - *All traffic except these networks*: listed networks go direct.
+  - *All traffic except these networks*: listed networks go direct. Domains work here too (`gosuslugi.ru`): see [Direct sites](#direct-sites).
   - *Keep local networks off the VPN*: 10/8, 172.16/12, 192.168/16 stay on your LAN.
   - *Kill switch*: see below (the ⓘ button explains it).
 - **DNS**:
@@ -174,8 +174,19 @@ The **+** button at the bottom of the list adds a tunnel of any kind (file, link
 Menu → **Settings…** (⌘,):
 
 - **General**: open Bridge at login, speed under connected tunnels in the menu, automatic update checks and **Check Now**, the helper's state and **Reinstall…**, the tunnels folder and the logs.
+- **Direct Sites**: sites that go direct while any tunnel takes all traffic (see below).
 - **Routing Profiles**: import, update and remove routing profiles (see below).
 - **Advanced**: version, source code and licenses.
+
+### Direct sites
+
+Some sites refuse foreign addresses or are simply faster without the VPN. List them in **Settings → Direct Sites** (for every tunnel that takes all traffic) or as domains in a tunnel's *All traffic except these networks* list (for that tunnel).
+
+- Bridge sends DNS for these domains (and their subdomains) to your Wi-Fi or Ethernet DNS server, looks them up there, and routes the addresses around the VPN through the physical network. It looks again every 5 minutes and when the network changes; addresses stay routed for 6 hours after they drop out of the answers.
+- The tunnel's details show each site and how many of its addresses go direct.
+- It is **best effort**: routes know addresses, not names. A site may also load from addresses its name doesn't return (CDNs, DNS over HTTPS in the browser), and another site on a shared address goes direct too. Only the domain and its `www.` host get routes; list other subdomains (`lk.example.com`) explicitly.
+- IPv6 addresses go direct only if the tunnel and the network both have IPv6. If the tunnel has no IPv6, Bridge blocks IPv6 anyway and browsers use IPv4.
+- Off while the tunnel's kill switch is on. VLESS, Trojan and Hysteria 2 tunnels can use routing profiles instead, which decide by name.
 
 ### Kill switch
 

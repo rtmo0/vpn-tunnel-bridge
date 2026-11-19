@@ -78,24 +78,38 @@ enum Routes {
         return fallback
     }
 
+    /// The physical IPv6 way out, if the network has IPv6: a default route on a real
+    /// interface (its gateway is usually link-local, e.g. fe80::1%en0).
+    static func uplinkIPv6() -> Lookup? {
+        let result = run("/usr/sbin/netstat", ["-rn", "-f", "inet6"])
+        guard result.succeeded else { return nil }
+        for line in result.output.split(separator: "\n") {
+            let cols = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard cols.count >= 4, cols[0] == "default", let interface = cols.last, !isVirtual(interface),
+                  IPAddress(cols[1].split(separator: "%").first.map(String.init) ?? "") != nil else { continue }
+            return Lookup(gateway: cols[1], interface: interface)
+        }
+        return nil
+    }
+
     /// Adds a route. Returns false if an identical route already existed (so we don't own it).
     @discardableResult
-    static func add(_ entry: RouteEntry) throws -> Bool {
+    static func add(_ entry: RouteEntry, quiet: Bool = false) throws -> Bool {
         let result = run(route, ["-q", "-n", "add"] + entry.arguments)
         if result.succeeded {
-            log("  + route \(entry)")
+            if !quiet { log("  + route \(entry)") }
             return true
         }
         if result.output.contains("File exists") {
-            log("  = route \(entry) already exists, leaving it alone")
+            if !quiet { log("  = route \(entry) already exists, leaving it alone") }
             return false
         }
         throw HelperError("Could not add route \(entry): \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
     }
 
-    static func delete(_ entry: RouteEntry) {
+    static func delete(_ entry: RouteEntry, quiet: Bool = false) {
         let result = run(route, ["-q", "-n", "delete"] + entry.arguments)
-        if result.succeeded {
+        if result.succeeded, !quiet {
             log("  - route \(entry)")
         }
     }

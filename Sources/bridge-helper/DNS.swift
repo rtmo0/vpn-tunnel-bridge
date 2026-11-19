@@ -136,6 +136,63 @@ final class DNSManager {
         }
     }
 
+    // MARK: DNS for direct sites
+
+    /// The DNS servers of the physical network on `interface` (Wi-Fi, Ethernet), as the
+    /// user or DHCP set them, ignoring what Bridge itself changed there.
+    func physicalServers(interface: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        let pattern = "State:/Network/Service/[^/]+/IPv4" as CFString
+        let serviceKeys = (SCDynamicStoreCopyKeyList(store, pattern) as? [String]) ?? []
+        for key in serviceKeys.sorted() {
+            let service = key.split(separator: "/")[3]
+            guard !service.hasPrefix("Bridge"),
+                  (SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any])?["InterfaceName"] as? String
+                    == interface else { continue }
+            let (stateKey, setupKey) = keys(String(service))
+            func servers(_ value: CFPropertyList?) -> [String] {
+                ((value as? [String: Any])?["ServerAddresses"] as? [String] ?? []).filter { IPAddress($0) != nil }
+            }
+            if let saved = override, saved.serviceID == service {
+                let setup = servers(Self.decode(saved.originalSetup))
+                return setup.isEmpty ? servers(Self.decode(saved.originalState)) : setup
+            }
+            let setup = servers(SCDynamicStoreCopyValue(store, setupKey as CFString))
+            return setup.isEmpty ? servers(SCDynamicStoreCopyValue(store, stateKey as CFString)) : setup
+        }
+        return []
+    }
+
+    private static func directKey(_ tunnel: String) -> String { "State:/Network/Service/BridgeDirect-\(tunnel)/DNS" }
+
+    /// Sends DNS for `domains` (and their subdomains) to `servers` of the physical network.
+    func applyDirect(tunnel: String, domains: [String], servers: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = Self.directKey(tunnel)
+        let value: [String: Any] = ["ServerAddresses": servers, "SupplementalMatchDomains": domains]
+        if let current = SCDynamicStoreCopyValue(store, key as CFString) as? NSDictionary,
+           current.isEqual(to: value) { return }
+        SCDynamicStoreRemoveValue(store, key as CFString)
+        if domains.isEmpty || servers.isEmpty {
+            flushDNSCache()
+            return
+        }
+        add(key, value)
+        log("  DNS for direct sites: \(servers.joined(separator: ", ")) (\(domains.count) domain(s))")
+        flushDNSCache()
+    }
+
+    func removeDirect(tunnel: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = Self.directKey(tunnel)
+        guard SCDynamicStoreCopyValue(store, key as CFString) != nil else { return }
+        SCDynamicStoreRemoveValue(store, key as CFString)
+        flushDNSCache()
+    }
+
     // MARK: System-wide DNS for split tunnels
 
     /// The primary service's DNS as it was before Bridge changed it.

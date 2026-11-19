@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
             a.name == b.name && a.kind == b.kind && a.saved == b.saved && a.brand == b.brand
                 && a.status?.state == b.status?.state && a.status?.connected == b.status?.connected
                 && a.status?.rxBytes == b.status?.rxBytes && a.status?.txBytes == b.status?.txBytes
+                && a.status?.directSites == b.status?.directSites
         }
     }
 

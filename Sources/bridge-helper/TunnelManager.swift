@@ -41,6 +41,8 @@ final class ActiveTunnel {
     var settings = TunnelSettings()
     /// VPN server addresses (kept reachable by the kill switch).
     var serverIPs: [String] = []
+    /// Sites routed around this tunnel (domains from its settings or the app's global list).
+    var directSites: DirectSitesRouter?
 
     init(name: String, kind: TunnelKind, wireGuard: TunnelConfig?, openVPN: OpenVPNConfig?,
          proxy: ProxyLink? = nil, proxyRouting: ProxyRouting? = nil, backendPath: String) {
@@ -61,6 +63,15 @@ final class ActiveTunnel {
         if let backend = backend as? OpenConnectBackend { return backend.fullTunnel }
         return openVPN?.redirectsGateway ?? false
     }
+
+    /// Whether IPv6 goes through this tunnel (otherwise a full tunnel blocks it).
+    var carriesIPv6: Bool {
+        if let wireGuard { return wireGuard.addresses.contains(where: \.isIPv6) }
+        if let backend = backend as? OpenConnectBackend { return backend.hasIPv6 }
+        if proxy != nil { return ipv6Active }
+        if let backend = backend as? OpenVPNBackend { return backend.snapshot.localIPv6 != nil }
+        return false
+    }
 }
 
 /// Owns all tunnels. Every method must run on `queue`.
@@ -75,6 +86,8 @@ final class TunnelManager {
     private var killSwitchHolds: [String: [String]] = [:]
     /// Interface/gateway used for routes outside the tunnels, to detect network changes.
     private var lastUplink: Routes.Lookup?
+    /// The app's global direct sites, for tunnels that take all traffic (sent with every `up`).
+    private var globalDirectSites: [String] = []
 
     var capabilities: [TunnelKind] {
         var kinds: [TunnelKind] = [.amneziawg, .wireguard]
@@ -107,9 +120,9 @@ final class TunnelManager {
                 }
                 guard let text = request.config else { return .failure("No configuration supplied", code: .invalidConfig) }
                 let settings = request.settings ?? TunnelSettings()
+                if let sites = request.directSites { globalDirectSites = try DirectSites.normalized(sites) }
                 let status = try up(name: name, configText: text, secrets: request.secrets ?? TunnelSecrets(),
                                     settings: settings, profile: request.profile, profileAssets: request.profileAssets)
-                tunnels[name]?.settings = settings
                 if tunnels[name]?.kind == .openvpn {
                     tunnels[name]?.openVPNRequest = (text, request.secrets ?? TunnelSecrets(), settings)
                 }
@@ -127,6 +140,18 @@ final class TunnelManager {
                 downAll()
                 updateFirewall()
                 return HelperResponse(ok: true)
+            case .setDirectSites:
+                globalDirectSites = try DirectSites.normalized(request.directSites ?? [])
+                log("direct sites: \(globalDirectSites.count) domain(s)")
+                for tunnel in tunnels.values.sorted(by: { $0.name < $1.name }) {
+                    if let router = tunnel.directSites {
+                        router.globalDomains = globalDirectSites
+                        router.refresh()
+                    } else {
+                        attachDirectSites(tunnel)
+                    }
+                }
+                return HelperResponse(ok: true, tunnels: statuses(filter: nil))
             case .openvpnEvent, .openconnectEvent, .setRequireAuthorization:
                 return .failure("Handled outside the manager queue")
             }
@@ -141,8 +166,50 @@ final class TunnelManager {
 
     // MARK: Up
 
+    /// Starts a tunnel, then routes its direct sites around it.
     private func up(name: String, configText: String, secrets: TunnelSecrets, settings: TunnelSettings,
                     profile: RoutingProfile? = nil, profileAssets: String? = nil) throws -> TunnelStatus {
+        let status = try startTunnel(name: name, configText: configText, secrets: secrets, settings: settings,
+                                     profile: profile, profileAssets: profileAssets)
+        guard let tunnel = tunnels[name] else { return status }
+        tunnel.settings = settings
+        attachDirectSites(tunnel)
+        return self.status(of: tunnel)
+    }
+
+    /// Gives a tunnel its direct sites: its own domains, and the global list once it takes all traffic.
+    private func attachDirectSites(_ tunnel: ActiveTunnel) {
+        guard tunnel.directSites == nil else { return }
+        let own = tunnel.settings.directDomains
+        guard !own.isEmpty || !globalDirectSites.isEmpty, tunnel.backend != nil else { return }
+        if tunnel.settings.killSwitch {
+            if !own.isEmpty || tunnel.routesAllTraffic {
+                tunnel.warnings.append("Direct sites are off: the kill switch blocks traffic outside the tunnel.")
+            }
+            return
+        }
+        let router = DirectSitesRouter(tunnel: tunnel.name, queue: queue)
+        router.ownDomains = own
+        router.globalDomains = globalDirectSites
+        router.takesAllTraffic = { [weak tunnel] in tunnel?.routesAllTraffic ?? false }
+        router.carriesIPv6 = { [weak tunnel] in tunnel?.carriesIPv6 ?? false }
+        router.protectedAddresses = { [weak self, weak tunnel] in
+            guard let self, let tunnel else { return [] }
+            return Set(self.tunnels.values.flatMap(self.servers(of:)) + self.servers(of: tunnel))
+        }
+        router.tunnelInterfaces = { [weak self] in self?.ourInterfaces ?? [] }
+        router.onRoutesChanged = { [weak self] in self?.saveState() }
+        tunnel.directSites = router
+        router.start()
+    }
+
+    /// A tunnel learned whether it takes all traffic (OpenVPN, OpenConnect): follow with direct sites.
+    func refreshDirectSites() {
+        for tunnel in tunnels.values { tunnel.directSites?.refresh() }
+    }
+
+    private func startTunnel(name: String, configText: String, secrets: TunnelSecrets, settings: TunnelSettings,
+                             profile: RoutingProfile? = nil, profileAssets: String? = nil) throws -> TunnelStatus {
         guard tunnels[name] == nil else {
             throw CodedError(code: .alreadyConnected, message: "Tunnel '\(name)' is already connected", detail: nil)
         }
@@ -483,6 +550,7 @@ final class TunnelManager {
     func openConnectChanged() {
         saveState()
         updateFirewall()
+        refreshDirectSites()
     }
 
     private func defaultMTU(uplink: String?) -> Int {
@@ -515,6 +583,8 @@ final class TunnelManager {
 
     private func teardown(_ tunnel: ActiveTunnel) {
         // Stop the backend first (OpenVPN's routes are removed with it).
+        tunnel.directSites?.stop()
+        tunnel.directSites = nil
         tunnel.backend?.stop()
         dns.remove(tunnel: tunnel.name)
         for route in tunnel.routes.reversed() { Routes.delete(route) }
@@ -591,21 +661,7 @@ final class TunnelManager {
             rules.servers += servers(of: tunnel)
             if tunnel.settings.killSwitch { rules.killSwitch = true }
             // A full tunnel without IPv6 would let IPv6 traffic go around it.
-            if tunnel.routesAllTraffic {
-                let hasIPv6: Bool
-                if let config = tunnel.wireGuard {
-                    hasIPv6 = config.addresses.contains(where: \.isIPv6)
-                } else if let backend = tunnel.backend as? OpenConnectBackend {
-                    hasIPv6 = backend.hasIPv6
-                } else if tunnel.proxy != nil {
-                    hasIPv6 = tunnel.ipv6Active
-                } else if let backend = tunnel.backend as? OpenVPNBackend {
-                    hasIPv6 = backend.snapshot.localIPv6 != nil
-                } else {
-                    hasIPv6 = false
-                }
-                if !hasIPv6 { rules.blockIPv6 = true }
-            }
+            if tunnel.routesAllTraffic && !tunnel.carriesIPv6 { rules.blockIPv6 = true }
         }
         for servers in killSwitchHolds.values {
             rules.killSwitch = true
@@ -680,6 +736,7 @@ final class TunnelManager {
             log("  '\(tunnel.name)' now reaches its server via \(uplink.interface ?? "?")")
         }
         ensureServerPins()
+        refreshDirectSites()
         saveState()
         updateFirewall()
     }
@@ -723,6 +780,15 @@ final class TunnelManager {
     }
 
     private func status(of tunnel: ActiveTunnel) -> TunnelStatus {
+        var status = backendStatus(of: tunnel)
+        if let router = tunnel.directSites {
+            let sites = router.statuses()
+            status.directSites = sites.isEmpty ? nil : sites
+        }
+        return status
+    }
+
+    private func backendStatus(of tunnel: ActiveTunnel) -> TunnelStatus {
         if let backend = tunnel.backend as? AmneziaBackend, let config = tunnel.wireGuard {
             let device = (try? backend.status()) ?? UAPI.DeviceStatus()
             let lastHandshake = device.peers.compactMap(\.lastHandshake).max()
@@ -803,7 +869,8 @@ final class TunnelManager {
         let entries = tunnels.values.map {
             PersistedTunnel(name: $0.name, pid: $0.backend?.pid ?? 0, backendPath: $0.backendPath,
                             interface: $0.backend?.interface ?? "",
-                            routes: $0.routes + (($0.backend as? OpenConnectBackend)?.routes ?? []))
+                            routes: $0.routes + (($0.backend as? OpenConnectBackend)?.routes ?? [])
+                                + ($0.directSites?.routes ?? []))
         }
         do {
             let data = try JSONEncoder.bridge.encode(entries)

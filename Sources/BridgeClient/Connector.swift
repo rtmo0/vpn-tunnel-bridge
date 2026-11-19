@@ -84,6 +84,14 @@ public enum HelperClient {
         return response.requireAuthorization ?? false
     }
 
+    /// Sends the global direct sites to the helper; tunnels that take all traffic follow at once.
+    @discardableResult
+    public static func setDirectSites(_ domains: [String]) throws -> [TunnelStatus] {
+        var request = HelperRequest(command: .setDirectSites)
+        request.directSites = domains
+        return try call(request, timeout: 60).tunnels ?? []
+    }
+
     /// Changing this always needs the password.
     public static func setRequiresAuthorization(_ on: Bool) throws {
         var request = HelperRequest(command: .setRequireAuthorization)
@@ -247,11 +255,12 @@ public enum Connector {
 
         var lastError = ClientError("Could not connect")
         for _ in 0..<4 {
-            let response = try HelperClient.send(
-                HelperRequest(command: .up, name: name, config: text,
-                              secrets: kind == .openvpn || kind == .openconnect ? secrets : nil,
-                              settings: settings.isDefault ? nil : settings, profile: profile,
-                              profileAssets: profileAssets))
+            var request = HelperRequest(command: .up, name: name, config: text,
+                                        secrets: kind == .openvpn || kind == .openconnect ? secrets : nil,
+                                        settings: settings.isDefault ? nil : settings, profile: profile,
+                                        profileAssets: profileAssets)
+            request.directSites = DirectSitesStore.load().active
+            let response = try HelperClient.send(request)
             if response.ok, let status = response.tunnels?.first {
                 if rememberAuth, let user = secrets.username, let pass = secrets.password {
                     try? Keychain.saveCredentials(username: user, password: pass, for: name)

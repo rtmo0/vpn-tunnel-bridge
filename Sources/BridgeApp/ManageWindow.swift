@@ -468,6 +468,14 @@ struct TunnelDetail: View {
             ForEach(status.warnings, id: \.self) { warning in
                 Label(warning, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
             }
+            if let sites = status.directSites, !sites.isEmpty {
+                DisclosureGroup {
+                    DirectSitesStatusList(sites: sites)
+                } label: {
+                    LabeledContent("Direct sites", value: String(localized:
+                        "\(sites.count) site(s), \(sites.reduce(0) { $0 + $1.addresses }) address(es)"))
+                }
+            }
         }
     }
 
@@ -540,7 +548,10 @@ struct TunnelDetail: View {
                 Text(routingHint).font(.caption).foregroundStyle(.secondary)
             }
             if settings.routing == .onlyListed || settings.routing == .allExceptListed {
-                listField("Networks", text: $networksText, prompt: "10.0.0.0/8, 192.168.50.0/24, 203.0.113.7",
+                listField(settings.routing == .allExceptListed ? "Networks and sites" : "Networks",
+                          text: $networksText,
+                          prompt: settings.routing == .allExceptListed ? "192.168.50.0/24, 203.0.113.7, example.com"
+                              : "10.0.0.0/8, 192.168.50.0/24, 203.0.113.7",
                           field: .networks, error: networksError)
             }
             Toggle("Keep local networks off the VPN", isOn: $settings.excludeLocalNetworks)
@@ -625,7 +636,7 @@ struct TunnelDetail: View {
             }
         case .allTraffic: String(localized: "Everything goes through the VPN.")
         case .onlyListed: String(localized: "Only these networks use the VPN; everything else goes direct.")
-        case .allExceptListed: String(localized: "These networks go direct; everything else uses the VPN.")
+        case .allExceptListed: String(localized: "These networks and sites go direct; everything else uses the VPN.")
         }
     }
 

@@ -24,7 +24,8 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
     }
 
     public var routing: Routing = .config
-    /// CIDRs (or single addresses) for `.onlyListed` / `.allExceptListed`.
+    /// CIDRs (or single addresses) for `.onlyListed` / `.allExceptListed`; with
+    /// `.allExceptListed` also domain names, whose sites go direct (see `DirectSites`).
     public var networks: [String] = []
     /// Keep private ranges (10/8, 172.16/12, 192.168/16, link-local) off the tunnel.
     public var excludeLocalNetworks = false
@@ -78,7 +79,18 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
     /// Throws a readable error for malformed entries.
     public func validate() throws {
         for item in networks where IPNetwork(item) == nil {
-            throw ConfigError("“\(item)” is not a network (use e.g. 10.0.0.0/8 or 192.168.1.10)")
+            if routing == .allExceptListed {
+                guard DirectSites.normalize(item) != nil else {
+                    throw ConfigError("“\(item)” is not a network or a domain (use e.g. 10.0.0.0/8, 192.168.1.10 or example.com)")
+                }
+            } else if DirectSites.normalize(item) != nil {
+                throw ConfigError("Domains work only with “All traffic except these networks”; “\(item)” is a domain")
+            } else {
+                throw ConfigError("“\(item)” is not a network (use e.g. 10.0.0.0/8 or 192.168.1.10)")
+            }
+        }
+        if directDomains.count > DirectSites.maxDomains {
+            throw ConfigError("Use at most \(DirectSites.maxDomains) domains")
         }
         if (routing == .onlyListed || routing == .allExceptListed) && networks.isEmpty {
             throw ConfigError("Add at least one network for this routing mode")
@@ -98,6 +110,16 @@ public struct TunnelSettings: Codable, Equatable, Sendable {
     }
 
     var parsedNetworks: [IPNetwork] { networks.compactMap(IPNetwork.init) }
+
+    /// Domains in `networks` whose sites go direct (`.allExceptListed` only), normalized.
+    public var directDomains: [String] {
+        guard routing == .allExceptListed else { return [] }
+        var out: [String] = []
+        for item in networks where IPNetwork(item) == nil {
+            if let domain = DirectSites.normalize(item), !out.contains(domain) { out.append(domain) }
+        }
+        return out
+    }
 }
 
 extension TunnelConfig {

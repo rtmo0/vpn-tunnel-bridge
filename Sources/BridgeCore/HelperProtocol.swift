@@ -9,7 +9,7 @@ public enum HelperProtocol {
     public static let installDirectory = "/Library/PrivilegedHelperTools/com.rtmo0.bridge.helper"
     /// Bump when the request/response format or helper behaviour changes,
     /// so the app knows to reinstall the helper.
-    public static let version = 8
+    public static let version = 9
     /// Authorization right a client must hold for tunnel changes when the helper asks for a
     /// password (registered in the authorization database by the installer).
     public static let controlRight = "com.rtmo0.bridge.control"
@@ -45,6 +45,8 @@ public struct HelperRequest: Codable, Sendable {
         case releaseKillSwitch
         /// Turn "ask for a password before tunnel changes" on or off (`flag`).
         case setRequireAuthorization
+        /// Replace the global list of direct sites (`directSites`) for tunnels that take all traffic.
+        case setDirectSites
         /// Sent by OpenVPN's route-up/down hook (runs as root) back to the helper.
         case openvpnEvent
         /// Sent by OpenConnect's vpnc-script (Bridge's helper, run as root).
@@ -53,7 +55,7 @@ public struct HelperRequest: Codable, Sendable {
 
     /// Commands that change tunnels; they need `authorization` while the helper asks for a password.
     public static let protectedCommands: Set<Command> = [.up, .down, .downAll, .releaseKillSwitch,
-                                                         .setRequireAuthorization]
+                                                         .setRequireAuthorization, .setDirectSites]
 
     public var command: Command
     public var name: String?
@@ -68,6 +70,8 @@ public struct HelperRequest: Codable, Sendable {
     /// AuthorizationExternalForm of the client's authorization (for `protectedCommands`).
     public var authorization: Data?
     public var flag: Bool?
+    /// Sites that go direct while a tunnel takes all traffic (sent with `up` and `setDirectSites`).
+    public var directSites: [String]?
 
     public init(command: Command, name: String? = nil, config: String? = nil, secrets: TunnelSecrets? = nil,
                 settings: TunnelSettings? = nil, event: String? = nil, environment: [String: String]? = nil,
@@ -127,6 +131,8 @@ public struct TunnelStatus: Codable, Sendable {
     public var txBytes: UInt64
     public var peers: [Peer]
     public var warnings: [String]
+    /// Sites routed around this tunnel and how resolving them went.
+    public var directSites: [DirectSiteStatus]?
 
     public init(name: String, kind: TunnelKind, interface: String, pid: Int32, startedAt: Date, connected: Bool,
                 state: String, server: String?, addresses: [String], dnsServers: [String], fullTunnel: Bool,

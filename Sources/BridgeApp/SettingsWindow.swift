@@ -7,7 +7,7 @@ import SwiftUI
 /// App-wide settings (⌘,): general options, updates, the helper, routing profiles
 /// and licenses. Per-tunnel settings stay in Manage Tunnels.
 enum SettingsWindow {
-    enum Tab: Hashable { case general, profiles, advanced }
+    enum Tab: Hashable { case general, directSites, profiles, advanced }
 
     final class State: ObservableObject {
         @Published var tab: Tab = .general
@@ -54,6 +54,9 @@ private struct SettingsView: View {
             GeneralSettings(updater: updater)
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(SettingsWindow.Tab.general)
+            DirectSitesSettings()
+                .tabItem { Label("Direct Sites", systemImage: "arrow.triangle.branch") }
+                .tag(SettingsWindow.Tab.directSites)
             ProfilesSettings()
                 .tabItem { Label("Routing Profiles", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }
                 .tag(SettingsWindow.Tab.profiles)

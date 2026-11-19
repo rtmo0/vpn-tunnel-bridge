@@ -290,3 +290,20 @@
 "Proxy port" = "Proxy-Port";
 "Runs without the network helper or administrator rights. Only apps set to the SOCKS5 or HTTP proxy 127.0.0.1:%lld use it." = "Läuft ohne Netzwerkhelfer und Administratorrechte. Nur Apps, die den SOCKS5- oder HTTP-Proxy 127.0.0.1:%lld nutzen, gehen darüber.";
 "All apps go through the VPN. Uses the network helper." = "Alle Apps gehen über das VPN. Nutzt den Netzwerkhelfer.";
+
+/* Direct sites */
+"Direct Sites" = "Direkte Websites";
+"Direct sites" = "Direkte Websites";
+"Send these sites direct while a tunnel takes all traffic" = "Diese Websites direkt senden, während ein Tunnel den gesamten Verkehr übernimmt";
+"Sites" = "Websites";
+"Revert" = "Zurücksetzen";
+"One per line or separated by commas. Subdomains are included in DNS." = "Eine pro Zeile oder durch Kommas getrennt. Subdomains werden im DNS mit erfasst.";
+"Bridge looks these sites up through your Wi-Fi or Ethernet DNS and routes their addresses around the VPN. It works for tunnels that take all traffic and is best effort: a site may also use addresses its name does not return (CDNs, DNS over HTTPS in the browser), and another site sharing an address goes direct too. Off while a tunnel's kill switch is on." = "Bridge löst diese Websites über das DNS deines WLANs oder Ethernets auf und leitet ihre Adressen am VPN vorbei. Das funktioniert für Tunnel, die den gesamten Verkehr übernehmen, ohne Garantie: Eine Website kann auch Adressen nutzen, die ihr Name nicht liefert (CDNs, DNS over HTTPS im Browser), und eine andere Website mit derselben Adresse geht ebenfalls direkt. Aus, solange der Kill Switch eines Tunnels an ist.";
+"Now around “%@”" = "Jetzt an „%@“ vorbei";
+"%lld address(es) direct" = "%lld Adresse(n) direkt";
+"Not found in DNS" = "Nicht im DNS gefunden";
+"Looking up…" = "Wird aufgelöst…";
+"IPv6 through the VPN (no IPv6 on this network)" = "IPv6 über das VPN (kein IPv6 in diesem Netzwerk)";
+"%lld site(s), %lld address(es)" = "%1$lld Website(s), %2$lld Adresse(n)";
+"Networks and sites" = "Netzwerke und Websites";
+"These networks and sites go direct; everything else uses the VPN." = "Diese Netzwerke und Websites gehen direkt; alles andere nutzt das VPN.";

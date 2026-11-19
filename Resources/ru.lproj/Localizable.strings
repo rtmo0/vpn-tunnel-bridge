@@ -290,3 +290,20 @@
 "Proxy port" = "Порт прокси";
 "Runs without the network helper or administrator rights. Only apps set to the SOCKS5 or HTTP proxy 127.0.0.1:%lld use it." = "Работает без сетевого помощника и прав администратора. Через него идут только программы, где указан SOCKS5- или HTTP-прокси 127.0.0.1:%lld.";
 "All apps go through the VPN. Uses the network helper." = "Все программы идут через VPN. Использует сетевой помощник.";
+
+/* Direct sites */
+"Direct Sites" = "Сайты напрямую";
+"Direct sites" = "Сайты напрямую";
+"Send these sites direct while a tunnel takes all traffic" = "Пускать эти сайты напрямую, когда туннель забирает весь трафик";
+"Sites" = "Сайты";
+"Revert" = "Отменить";
+"One per line or separated by commas. Subdomains are included in DNS." = "По одному в строке или через запятую. Поддомены тоже резолвятся через DNS сети.";
+"Bridge looks these sites up through your Wi-Fi or Ethernet DNS and routes their addresses around the VPN. It works for tunnels that take all traffic and is best effort: a site may also use addresses its name does not return (CDNs, DNS over HTTPS in the browser), and another site sharing an address goes direct too. Off while a tunnel's kill switch is on." = "Bridge узнаёт адреса этих сайтов через DNS вашей сети Wi-Fi или Ethernet и направляет их в обход VPN. Работает для туннелей, которые забирают весь трафик, и не гарантирует результат: сайт может ходить и на адреса, которых нет в ответе DNS (CDN, DNS over HTTPS в браузере), а другой сайт на том же адресе тоже пойдёт напрямую. Не действует, пока у туннеля включён kill switch.";
+"Now around “%@”" = "Сейчас в обход «%@»";
+"%lld address(es) direct" = "Напрямую адресов: %lld";
+"Not found in DNS" = "Не найден в DNS";
+"Looking up…" = "Поиск адресов…";
+"IPv6 through the VPN (no IPv6 on this network)" = "IPv6 через VPN (в этой сети нет IPv6)";
+"%lld site(s), %lld address(es)" = "Сайтов: %1$lld, адресов: %2$lld";
+"Networks and sites" = "Сети и сайты";
+"These networks and sites go direct; everything else uses the VPN." = "Эти сети и сайты идут напрямую, остальное — через VPN.";
