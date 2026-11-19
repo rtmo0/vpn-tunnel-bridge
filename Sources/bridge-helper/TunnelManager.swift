@@ -553,6 +553,7 @@ final class TunnelManager {
 
     /// An OpenConnect tunnel (re)configured itself: follow with the firewall and saved state.
     func openConnectChanged() {
+        ensureServerPins()
         saveState()
         updateFirewall()
         refreshDirectSites()
@@ -756,6 +757,7 @@ final class TunnelManager {
     /// through another tunnel (Bridge's or another VPN app's) means double
     /// encryption and a detour.
     func ensureServerPins() {
+        ensureDNSPins()
         let ours = ourInterfaces
         guard let uplink = Routes.uplink(excluding: ours) else { return }
         for tunnel in tunnels.values {
@@ -773,6 +775,28 @@ final class TunnelManager {
             }
         }
         saveState()
+    }
+
+    /// Keeps the DNS servers of a tunnel that takes all traffic inside that tunnel. Another
+    /// tunnel's more specific route (e.g. an OpenVPN server pushing 10.0.0.0/8) would
+    /// otherwise capture a DNS server like 10.17.0.1, and with it every name lookup.
+    private func ensureDNSPins() {
+        let ours = ourInterfaces
+        for tunnel in tunnels.values where tunnel.routesAllTraffic {
+            guard let own = tunnel.backend?.interface, !own.isEmpty else { continue }
+            for server in dns.servers(for: tunnel.name) {
+                guard let ip = IPAddress(server), !ip.isIPv6,
+                      !tunnel.routes.contains(where: { $0.destination == server && $0.interface == own }),
+                      let interface = Routes.lookup(server, ipv6: false)?.interface,
+                      interface != own, ours.contains(interface) else { continue }
+                let pin = RouteEntry(destination: server, ipv6: false, gateway: nil, interface: own)
+                if (try? Routes.add(pin)) == true {
+                    tunnel.routes.append(pin)
+                    let other = tunnels.values.first { $0.backend?.interface == interface }?.name ?? interface
+                    log("  '\(tunnel.name)' DNS \(server) kept in \(own) (routes of '\(other)' cover it)")
+                }
+            }
+        }
     }
 
     // MARK: Status
