@@ -14,6 +14,7 @@ enum SettingsWindow {
     }
 
     private static var window: NSWindow?
+    private static var closeObserver: NSObjectProtocol?
     private static let state = State()
     /// Set once by the menu controller, which owns the updater.
     static var updater: Updater?
@@ -27,6 +28,15 @@ enum SettingsWindow {
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.isReleasedWhenClosed = false
             window.center()
+            // Drop the window when it closes: a hidden SwiftUI view kept alive keeps tracking
+            // the model, and its observation records pile up with every refresh.
+            closeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { _ in
+                if let observer = closeObserver { NotificationCenter.default.removeObserver(observer) }
+                closeObserver = nil
+                self.window = nil
+            }
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)

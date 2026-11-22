@@ -108,6 +108,7 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
+        update()  // uptimes in the open menu are as of now
         model.refresh()
     }
 

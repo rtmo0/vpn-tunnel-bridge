@@ -121,7 +121,7 @@ final class AppModel: ObservableObject {
                             saved: $0.saved, brand: $0.brand)
                     }
                 }
-                if statuses != nil || !proxies.isEmpty { self.updateRates(rows) }
+                let ratesChanged = (statuses != nil || !proxies.isEmpty) && self.updateRates(rows)
                 // Tunnels already up when the app started: assume their current settings apply.
                 for row in rows where row.status != nil && self.appliedSettings[row.name] == nil && row.saved {
                     self.appliedSettings[row.name] = TunnelLibrary.settings(for: row.name)
@@ -129,13 +129,17 @@ final class AppModel: ObservableObject {
                 for name in self.appliedSettings.keys where !rows.contains(where: { $0.name == name && $0.status != nil }) {
                     if !self.busy.contains(name) { self.appliedSettings[name] = nil }
                 }
-                let changed = rows != self.rows || availability != self.helper
+                // Row == leaves out handshakes, addresses and warnings; compare whole statuses.
+                let changed = rows != self.rows || Self.statusData(rows) != Self.statusData(self.rows)
+                    || availability != self.helper || ratesChanged
                     || (holds != nil && holds != self.killSwitchHolds)
                 if statuses != nil { self.notifyDrops(from: self.rows, to: rows, holds: holds ?? []) }
                 if let holds { self.killSwitchHolds = holds }
                 self.rows = rows
                 self.helper = availability
-                if changed || statuses != nil { self.changed() }
+                // Only on a real change: this runs every 2 s, and each objectWillChange makes
+                // SwiftUI track the model again.
+                if changed { self.changed() }
             }
         }
     }
@@ -153,7 +157,19 @@ final class AppModel: ObservableObject {
         userStopped = userStopped.filter { up.contains($0) || busy.contains($0) }
     }
 
-    private func updateRates(_ rows: [Row]) {
+    private static let statusEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
+    }()
+
+    /// Everything the helper reported, for telling whether anything shown changed.
+    private static func statusData(_ rows: [Row]) -> Data? {
+        try? statusEncoder.encode(rows.map(\.status))
+    }
+
+    /// Returns whether any shown rate changed.
+    private func updateRates(_ rows: [Row]) -> Bool {
         let now = Date()
         var next: [String: (rx: UInt64, tx: UInt64, at: Date)] = [:]
         var rates: [String: (rx: Double, tx: Double)] = [:]
@@ -166,7 +182,12 @@ final class AppModel: ObservableObject {
             next[row.name] = (status.rxBytes, status.txBytes, now)
         }
         lastCounters = next
+        let changed = rates.count != self.rates.count || rates.contains { name, rate in
+            guard let old = self.rates[name] else { return true }
+            return old.rx != rate.rx || old.tx != rate.tx
+        }
         self.rates = rates
+        return changed
     }
 
     // MARK: Connect / disconnect

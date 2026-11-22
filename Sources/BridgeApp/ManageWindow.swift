@@ -15,6 +15,7 @@ final class ManageSelection: ObservableObject {
 /// "Manage Tunnels" window: tunnel list on the left, details and settings on the right.
 enum ManageWindow {
     private static var window: NSWindow?
+    private static var closeObserver: NSObjectProtocol?
     private static let selection = ManageSelection()
 
     static func show(model: AppModel, select name: String? = nil, addTunnel: Bool = false) {
@@ -34,6 +35,15 @@ enum ManageWindow {
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName("BridgeManageWindow")
             if !window.setFrameUsingName("BridgeManageWindow") { window.center() }
+            // Drop the window when it closes: a hidden SwiftUI view kept alive keeps tracking
+            // the model, and its observation records pile up with every refresh.
+            closeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { _ in
+                if let observer = closeObserver { NotificationCenter.default.removeObserver(observer) }
+                closeObserver = nil
+                self.window = nil
+            }
             self.window = window
         }
         if let name { selection.name = name }
@@ -462,8 +472,11 @@ struct TunnelDetail: View {
                     .textSelection(.enabled)
             }
             if status.kind != .openvpn && status.kind != .openconnect {
-                LabeledContent(status.kind.usesXray ? String(localized: "Last check") : String(localized: "Last handshake"),
-                               value: status.lastHandshake.map { Format.ago($0) } ?? String(localized: "Never"))
+                // "… ago" has to tick on its own: the model only publishes real changes.
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    LabeledContent(status.kind.usesXray ? String(localized: "Last check") : String(localized: "Last handshake"),
+                                   value: status.lastHandshake.map { Format.ago($0) } ?? String(localized: "Never"))
+                }
             }
             ForEach(status.warnings, id: \.self) { warning in
                 Label(warning, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
